@@ -48,10 +48,10 @@ that belief as a fact, so another self-check can reproduce the same mistake.
 Z.A.E.B.A.L. adds a feedback loop to the user-message boundary:
 
 - profanity and direct complaints become an audit signal;
-- positive profanity such as “fucking great” does not add to the streak and closes an
-  active incident as an acknowledgment;
+- positive profanity such as “fucking great” is silent and does not add to the streak,
+  but it is not an acknowledgment and does not close an active incident;
 - repeated signals escalate from a local protocol to a full stop;
-- at level 3, an external agent reads the transcript and repository evidence;
+- at level 3, the hook attempts a technically read-only external audit;
 - work resumes only after an explicit user acknowledgment.
 
 The current release does **not** install a technical tool lock. The protocol changes the
@@ -119,11 +119,11 @@ normalize → detect → classify
 |---|---:|---|---|
 | **L1** | `1–1.5` | Stop, run two independent checks, inventory assumptions, prepare a micro-plan. | Optional |
 | **L2** | `2–3.5` | Remove unverified assumptions and compare the work against the original request. | Disabled by default |
-| **L3** | `4+` | Stop all agents and background work; show the user the belief, evidence, and mismatch. | Enabled by default |
+| **L3** | `4+` | Stop all agents and background work; show the user the belief, evidence, and mismatch. | Attempted by default; unsafe built-ins are refused |
 
 Directed complaints add `1.0`; profanity without a detected addressee adds `0.5`.
-The window is 30 minutes. Calm questions do not reset it. Genuine praise or an explicit
-acknowledgment does.
+The window is 30 minutes. Calm questions and praise do not reset it. Only an explicit
+continuation-bearing acknowledgment does.
 
 ## Install
 
@@ -146,8 +146,8 @@ the relevant user configuration:
 |---|---|---|
 | Claude Code | `UserPromptSubmit` in `~/.claude/settings.json` | `claude -p` with `Read,Grep,Glob` only |
 | Codex CLI | `UserPromptSubmit` in `~/.codex/hooks.json` | `codex exec --sandbox read-only` |
-| Kimi CLI | hook block in `~/.kimi-code/config.toml` | `kimi -p` |
-| OpenCode | plugin in `~/.config/opencode/plugins/zaebal.ts` | `opencode run` |
+| Kimi CLI | hook block in `$KIMI_CODE_HOME/config.toml` when set, otherwise `~/.kimi-code/config.toml` | `kimi -p` (unsafe opt-in) |
+| OpenCode | plugin in `~/.config/opencode/plugins/zaebal.ts` | `opencode run` (unsafe opt-in) |
 
 Installation is idempotent: existing Z.A.E.B.A.L. hook entries are replaced, while
 unrelated settings and `~/.zaebal/config.json` are preserved. Restart active agent
@@ -171,6 +171,18 @@ echo '{"session_id":"demo-praise","prompt":"this is fucking great"}' \
   | ZAEBAL_STATE_DIR="$(mktemp -d)" python3 core/zaebal.py --host kimi
 ```
 
+For Kimi, verify host consumption (not just TOML syntax) without contacting a
+model backend:
+
+```bash
+scripts/kimi-host-canary.sh
+```
+
+The canary uses an isolated `KIMI_CODE_HOME`, sends Kimi a real content-part
+prompt, records the hook incident in temporary state, and blocks the turn at
+`UserPromptSubmit`. If `KIMI_CODE_HOME` is set during installation, the
+installer creates and uses that directory instead of `~/.kimi-code`.
+
 ## Configuration
 
 Defaults live in [`core/config.json`](core/config.json). User overrides live in
@@ -182,16 +194,18 @@ Defaults live in [`core/config.json`](core/config.json). User overrides live in
   "audit_levels": [3],
   "auditor_timeout_sec": 90,
   "auditor_command": "",
+  "allow_unsafe_auditor": false,
   "transcript_tail_chars": 12000
 }
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auditor` | `"same"` | Same vendor as the host, a specific `kimi` / `claude` / `codex` / `opencode`, or `"none"`. |
+| `auditor` | `"same"` | Same vendor as the host, a specific `kimi` / `claude` / `codex` / `opencode`, or `"none"`. Built-in Kimi/OpenCode auditing degrades visibly unless unsafe mode is explicitly enabled. |
 | `audit_levels` | `[3]` | Levels that synchronously invoke an external auditor. Use `[2, 3]` for earlier audits. |
 | `auditor_timeout_sec` | `90` | Maximum time to wait for the auditor response. |
 | `auditor_command` | `""` | Custom command; the audit prompt is appended as the final argument. |
+| `allow_unsafe_auditor` | `false` | Opt in to built-in Kimi/OpenCode auditors even though those CLIs provide no enforced read-only mode. Prefer Claude/Codex or a sandboxed `auditor_command`. |
 | `transcript_tail_chars` | `12000` | Maximum transcript tail sent to the auditor. |
 
 Example: use Claude to audit a Codex session:
@@ -259,8 +273,8 @@ end-to-end protocol injection.
 - The detector does not identify non-profane action loops; adding a general loop detector
   would be a separate product with its own false-positive model.
 - State locking uses POSIX `fcntl`; concurrent hooks on Windows can lose updates.
-- The Kimi and OpenCode auditor commands are not technically sandboxed by Z.A.E.B.A.L.;
-  they rely on the audit prompt and any restrictions already configured in those hosts.
+- Built-in Kimi and OpenCode auditors have no enforced read-only mode and are refused by
+  default. `allow_unsafe_auditor: true` is an explicit unsafe opt-in.
 - External audits are synchronous on configured levels, so the user waits for the
   auditor or timeout.
 

@@ -48,10 +48,10 @@ Z.A.E.B.A.L. 把用户的明显不满视为操作信号：停止当前路线、�
 Z.A.E.B.A.L. 在用户消息入口加入反馈闭环：
 
 - 粗口和直接抱怨会成为审计信号；
-- “fucking great” 这类带粗口的正面评价不会增加连续权重；如果已有事件，则会把它
-  作为确认并关闭；
+- “fucking great” 这类带粗口的正面评价保持静默且不会增加连续权重，但不算确认，
+  也不会关闭已有事件；
 - 信号反复出现时，协议会逐级升级，最终要求完全停止；
-- 在 L3，外部智能体会读取会话记录和仓库证据；
+- 在 L3，hook 会尝试启动技术上只读的外部审计；
 - 只有用户明确确认后，工作才会继续。
 
 当前版本不安装技术性工具锁。协议通过上下文要求智能体停止，最终控制权始终
@@ -117,10 +117,10 @@ normalize → detect → classify
 |---|---:|---|---|
 | **L1** | `1–1.5` | 停止，执行两次独立检查，列出假设并准备微型计划。 | 可选 |
 | **L2** | `2–3.5` | 移除未经验证的假设，并把当前工作与原始需求逐项比较。 | 默认关闭 |
-| **L3** | `4+` | 停止所有智能体与后台任务，向用户展示错误假设、证据和偏差。 | 默认开启 |
+| **L3** | `4+` | 停止所有智能体与后台任务，向用户展示错误假设、证据和偏差。 | 默认尝试；不安全的内置审计器会被拒绝 |
 
 定向抱怨增加 `1.0`，没有检测到对象的粗口增加 `0.5`。窗口为 30 分钟。普通问题
-不会重置状态；真正的正面评价或明确确认会重置。
+不会重置状态；正面评价也不会重置，只有明确同意继续才会重置。
 
 ## 安装
 
@@ -142,8 +142,8 @@ chmod +x install.sh
 |---|---|---|
 | Claude Code | `~/.claude/settings.json` 中的 `UserPromptSubmit` | `claude -p`，仅允许 `Read,Grep,Glob` |
 | Codex CLI | `~/.codex/hooks.json` 中的 `UserPromptSubmit` | `codex exec --sandbox read-only` |
-| Kimi CLI | `~/.kimi-code/config.toml` 中的 hook 区块 | `kimi -p` |
-| OpenCode | `~/.config/opencode/plugins/zaebal.ts` plugin | `opencode run` |
+| Kimi CLI | 设置时位于 `$KIMI_CODE_HOME/config.toml`，否则位于 `~/.kimi-code/config.toml` | `kimi -p`（unsafe opt-in） |
+| OpenCode | `~/.config/opencode/plugins/zaebal.ts` plugin | `opencode run`（unsafe opt-in） |
 
 安装过程可重复执行：旧的 Z.A.E.B.A.L. hook 会被替换，其他设置以及
 `~/.zaebal/config.json` 会保留。安装后请重启当前智能体会话。
@@ -166,6 +166,16 @@ echo '{"session_id":"demo-praise","prompt":"this is fucking great"}' \
   | ZAEBAL_STATE_DIR="$(mktemp -d)" python3 core/zaebal.py --host kimi
 ```
 
+要验证 Kimi 确实消费了 hook（而不只是接受 TOML），并避免访问模型后端，请运行：
+
+```bash
+scripts/kimi-host-canary.sh
+```
+
+该 canary 使用隔离的 `KIMI_CODE_HOME`，发送真实的 content-part prompt，
+并在 `UserPromptSubmit` 阶段阻止 turn。安装时若设置了 `KIMI_CODE_HOME`，
+安装器会创建并使用该目录，而不是 `~/.kimi-code`。
+
 ## 配置
 
 默认值位于 [`core/config.json`](core/config.json)。用户覆盖配置位于
@@ -177,16 +187,18 @@ echo '{"session_id":"demo-praise","prompt":"this is fucking great"}' \
   "audit_levels": [3],
   "auditor_timeout_sec": 90,
   "auditor_command": "",
+  "allow_unsafe_auditor": false,
   "transcript_tail_chars": 12000
 }
 ```
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `auditor` | `"same"` | 与宿主相同的厂商、指定 `kimi` / `claude` / `codex` / `opencode`，或 `"none"`。 |
+| `auditor` | `"same"` | 与宿主相同的厂商、指定 `kimi` / `claude` / `codex` / `opencode`，或 `"none"`。内置 Kimi/OpenCode 审计在未显式启用 unsafe 模式时会明确降级。 |
 | `audit_levels` | `[3]` | 同步调用外部审计器的级别；使用 `[2, 3]` 可以更早审计。 |
 | `auditor_timeout_sec` | `90` | 等待审计结果的最长秒数。 |
 | `auditor_command` | `""` | 自定义命令；审计 prompt 会作为最后一个参数加入。 |
+| `allow_unsafe_auditor` | `false` | 允许没有强制只读模式的内置 Kimi/OpenCode 审计器。优先使用 Claude/Codex 或 sandboxed `auditor_command`。 |
 | `transcript_tail_chars` | `12000` | 发送给审计器的最大会话尾部字符数。 |
 
 示例：让 Claude 审计 Codex 会话。
@@ -251,8 +263,8 @@ python3 -m unittest test_zaebal -v
 - 检测器不会识别不含粗口的动作循环；通用 loop detector 是另一个产品，并有自己
   的误报模型。
 - 状态锁使用 POSIX `fcntl`；Windows 上的并发 hook 可能丢失更新。
-- Kimi 与 OpenCode 的审计命令不会被 Z.A.E.B.A.L. 技术性地 sandbox；它们依赖
-  审计 prompt 以及宿主中已有的限制。
+- 内置 Kimi 与 OpenCode 审计器没有强制只读模式，因此默认拒绝运行；
+  `allow_unsafe_auditor: true` 是显式 unsafe opt-in。
 - 外部审计是同步的；在启用的级别上，用户需要等待审计结果或超时。
 
 ## 卸载

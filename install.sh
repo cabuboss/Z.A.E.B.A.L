@@ -6,6 +6,7 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$HOME/.zaebal"
+KIMI_HOME="${KIMI_CODE_HOME:-$HOME/.kimi-code}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "error: python3 not found in PATH" >&2
@@ -74,8 +75,11 @@ if [ -d "$HOME/.codex" ]; then
   fi
 fi
 
-if [ -d "$HOME/.kimi-code" ]; then
-  KIMI_CFG="$HOME/.kimi-code/config.toml"
+if [ -n "${KIMI_CODE_HOME:-}" ]; then
+  mkdir -p "$KIMI_HOME"
+fi
+if [ -d "$KIMI_HOME" ]; then
+  KIMI_CFG="$KIMI_HOME/config.toml"
   touch "$KIMI_CFG"
   backup "$KIMI_CFG"
   if grep -q ">>> Z.A.E.B.A.L. hook" "$KIMI_CFG"; then
@@ -92,7 +96,7 @@ PYEOF
   fi
   printf '\n' >> "$KIMI_CFG"
   cat "$SRC/adapters/kimi-cli/hooks-snippet.toml" >> "$KIMI_CFG"
-  echo "[kimi]      hooks wired into ~/.kimi-code/config.toml"
+  echo "[kimi]      hooks wired into $KIMI_CFG"
 fi
 
 if [ -d "$HOME/.config/opencode" ]; then

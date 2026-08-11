@@ -3,6 +3,7 @@
 set -euo pipefail
 
 DEST="$HOME/.zaebal"
+KIMI_HOME="${KIMI_CODE_HOME:-$HOME/.kimi-code}"
 
 remove_json_hook() {  # $1 = settings file
   [ -f "$1" ] || return 0
@@ -33,7 +34,7 @@ PYEOF
 [ -f "$HOME/.claude/settings.json" ] && remove_json_hook "$HOME/.claude/settings.json" && echo "[claude]    hooks removed"
 [ -f "$HOME/.codex/hooks.json" ] && remove_json_hook "$HOME/.codex/hooks.json" && echo "[codex]     hooks removed"
 
-KIMI_CFG="$HOME/.kimi-code/config.toml"
+KIMI_CFG="$KIMI_HOME/config.toml"
 if [ -f "$KIMI_CFG" ] && grep -q ">>> Z.A.E.B.A.L. hook" "$KIMI_CFG"; then
   python3 - "$KIMI_CFG" <<'PYEOF'
 import pathlib, re, sys

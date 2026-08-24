@@ -80,7 +80,8 @@ show whether a discipline-based STOP remains insufficient.
 | Intent classification | Separates praise, directed complaints, and ambiguous frustration before changing the streak. | `classify()`; weights `0`, `1.0`, and `0.5` |
 | Session escalation | Tracks each session in a 30-minute sliding window and selects L1, L2, or L3. | Atomic JSON state + POSIX `fcntl` lock |
 | Three audit protocols | Injects increasingly strict instructions: independent checks, assumption inventory, and full stop. | `core/protocol/L1.md` → `L3.md` |
-| External auditor | Runs the same or a cross-vendor CLI against the transcript tail and repository evidence. | Claude, Codex, Kimi, or OpenCode |
+| Session-first evidence | Requires the working agent and two internal auditors to read the chronology, locate the first divergence, and correlate it with diffs and timestamped commits. | Transcript locator + bounded excerpt + Git chronology |
+| External auditor | Runs the same or a cross-vendor CLI against the session source, an orientation excerpt, and repository evidence. | Claude, Codex, Kimi, or OpenCode |
 | Four host adapters | Hooks Claude Code, Codex CLI, Kimi CLI, and OpenCode at user-message submission. | JSON hooks, TOML hook, or TypeScript plugin |
 | Explicit recovery | Resets the incident only after acknowledgment such as `continue`, `продолжай`, or `по плану`. | Per-session state lifecycle |
 | Metadata telemetry | Appends trigger, auditor, verdict, and acknowledgment events without message contents. | `~/.zaebal/incidents.jsonl` |
@@ -117,9 +118,9 @@ normalize → detect → classify
 
 | Level | Streak weight | Agent behavior | External auditor |
 |---|---:|---|---|
-| **L1** | `1–1.5` | Stop, run two independent checks, inventory assumptions, prepare a micro-plan. | Optional |
-| **L2** | `2–3.5` | Remove unverified assumptions and compare the work against the original request. | Disabled by default |
-| **L3** | `4+` | Stop all agents and background work; show the user the belief, evidence, and mismatch. | Attempted by default; unsafe built-ins are refused |
+| **L1** | `0.5–1.5` | Read session history, locate the first divergence, run two independent internal audits, and prepare a micro-plan. | Optional |
+| **L2** | `2–3.5` | Re-read the chronology, run two fresh internal audits, audit the previous conclusion, and compare against the original request. | Disabled by default |
+| **L3** | `4+` | Stop all non-audit work; run two internal audits plus the configured external audit, correlate the accusation streak with Git history, and wait for acknowledgment. | Attempted by default; unsafe built-ins are refused |
 
 Directed complaints add `1.0`; profanity without a detected addressee adds `0.5`.
 The window is 30 minutes. Calm questions and praise do not reset it. Only an explicit
@@ -195,7 +196,8 @@ Defaults live in [`core/config.json`](core/config.json). User overrides live in
   "auditor_timeout_sec": 90,
   "auditor_command": "",
   "allow_unsafe_auditor": false,
-  "transcript_tail_chars": 12000
+  "transcript_tail_chars": 12000,
+  "agent_context_tail_chars": 2500
 }
 ```
 
@@ -206,7 +208,8 @@ Defaults live in [`core/config.json`](core/config.json). User overrides live in
 | `auditor_timeout_sec` | `90` | Maximum time to wait for the auditor response. |
 | `auditor_command` | `""` | Custom command; the audit prompt is appended as the final argument. |
 | `allow_unsafe_auditor` | `false` | Opt in to built-in Kimi/OpenCode auditors even though those CLIs provide no enforced read-only mode. Prefer Claude/Codex or a sandboxed `auditor_command`. |
-| `transcript_tail_chars` | `12000` | Maximum transcript tail sent to the auditor. |
+| `transcript_tail_chars` | `12000` | Maximum orientation excerpt sent to the auditor; a readable transcript path remains the authoritative history. |
+| `agent_context_tail_chars` | `2500` | Orientation excerpt injected for the working agent on every level. When a transcript path is available, all audit participants must inspect that source rather than treating the excerpt as complete history. |
 
 Example: use Claude to audit a Codex session:
 
@@ -248,6 +251,7 @@ Runtime state is stored under `~/.zaebal/`:
 ├── config.json    # optional user overrides
 ├── state.json     # per-session weighted trigger history
 ├── incidents.jsonl # metadata-only trigger and acknowledgment events
+├── transcripts/opencode/ # private text snapshots used as OpenCode audit context
 └── state.lock     # POSIX lock for concurrent hooks
 ```
 
@@ -275,6 +279,9 @@ end-to-end protocol injection.
 - State locking uses POSIX `fcntl`; concurrent hooks on Windows can lose updates.
 - Built-in Kimi and OpenCode auditors have no enforced read-only mode and are refused by
   default. `allow_unsafe_auditor: true` is an explicit unsafe opt-in.
+- On a detected trigger, the OpenCode adapter stores a mode-`0600` text snapshot of the
+  session messages under `~/.zaebal/transcripts/opencode/`; snapshots remain until
+  uninstall or manual cleanup.
 - External audits are synchronous on configured levels, so the user waits for the
   auditor or timeout.
 

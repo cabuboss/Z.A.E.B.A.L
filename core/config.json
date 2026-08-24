@@ -4,5 +4,6 @@
   "auditor_timeout_sec": 90,
   "auditor_command": "",
   "allow_unsafe_auditor": false,
-  "transcript_tail_chars": 12000
+  "transcript_tail_chars": 12000,
+  "agent_context_tail_chars": 2500
 }

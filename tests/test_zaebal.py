@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import re
@@ -16,13 +18,14 @@ sys.path.insert(0, str(CORE_DIR))
 import zaebal  # noqa: E402
 
 VALID_AUDIT_VERDICT = """1. CONTRACT — requested fix; observed failure.
-2. FACTS — test output confirms the symptom.
-3. HYPOTHESES — cause A; cause B.
-4. DISCRIMINATING CHECK — inspect the active artifact.
-5. PREVIOUS AUDIT — none available.
-6. WRONG BELIEF — not established.
-7. STATUS — UNVERIFIED.
-8. OUTCOME GATE — original request succeeds visibly."""
+2. DIVERGENCE POINT — turn 3 changed the target; commit abc123 followed.
+3. FACTS — test output confirms the symptom.
+4. HYPOTHESES — cause A; cause B.
+5. DISCRIMINATING CHECK — inspect the active artifact.
+6. PREVIOUS AUDIT — none available.
+7. WRONG BELIEF — not established.
+8. STATUS — UNVERIFIED.
+9. OUTCOME GATE — original request succeeds visibly."""
 
 
 class TempState(unittest.TestCase):
@@ -303,6 +306,24 @@ class TestAcknowledge(TempState):
     def test_ack_noop(self):
         self.assertFalse(zaebal.acknowledge("s"))
 
+    def test_ack_reports_persistence_failure_without_claiming_reset(self):
+        zaebal.record_trigger("s")
+        before = zaebal.STATE_FILE.read_text()
+        with mock.patch.object(zaebal, "_save_state", return_value=False):
+            self.assertIsNone(zaebal.acknowledge("s"))
+        self.assertEqual(zaebal.STATE_FILE.read_text(), before)
+
+    def test_ack_persistence_failure_is_visible_to_agent(self):
+        with mock.patch.object(zaebal, "acknowledge", return_value=None):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                zaebal.mode_prompt("codex", {
+                    "session_id": "s",
+                    "prompt": "продолжай",
+                })
+        self.assertIn("could not be persisted", out.getvalue())
+        self.assertNotIn("Streak reset:", out.getvalue())
+
     def test_dismiss_removes_exact_trigger_and_replay_is_noop(self):
         _, _, genuine = zaebal.record_trigger("s", weight=1.0, return_token=True)
         _, _, false = zaebal.record_trigger("s", weight=0.5, return_token=True)
@@ -349,6 +370,32 @@ class TestTelemetry(TempState):
         self.assertNotIn("prompt", raw)
 
 
+class TestConfig(TempState):
+    def test_invalid_types_fall_back_without_silencing_protocol(self):
+        zaebal.CONFIG_USER.write_text(json.dumps({
+            "audit_levels": None,
+            "auditor_timeout_sec": "bad",
+            "transcript_tail_chars": -1,
+            "agent_context_tail_chars": {},
+            "allow_unsafe_auditor": "false",
+        }))
+        cfg = zaebal.load_config()
+        self.assertEqual(cfg["audit_levels"], [3])
+        self.assertEqual(cfg["auditor_timeout_sec"], 90)
+        self.assertEqual(cfg["transcript_tail_chars"], 12000)
+        self.assertEqual(cfg["agent_context_tail_chars"], 2500)
+        self.assertFalse(cfg["allow_unsafe_auditor"])
+
+        with mock.patch.object(zaebal, "load_config", return_value=cfg):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                zaebal.mode_prompt("codex", {
+                    "session_id": "invalid-config",
+                    "prompt": "ты меня заебал",
+                })
+        self.assertIn('<zaebal level="1">', out.getvalue())
+
+
 class TestPortablePaths(unittest.TestCase):
     def test_installer_and_adapters_have_no_machine_specific_home(self):
         paths = [
@@ -375,6 +422,19 @@ class TestPortablePaths(unittest.TestCase):
         self.assertIn('dirname "${BASH_SOURCE[0]}"', installer)
         self.assertIn('DEST="$HOME/.zaebal"', installer)
         self.assertIn("join(homedir(), \".zaebal\"", opencode)
+
+    def test_opencode_snapshots_session_history_for_core(self):
+        opencode = (
+            PROJECT_DIR / "adapters/opencode/zaebal.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn("client.session.messages", opencode)
+        self.assertIn('"--classify-only"', opencode)
+        self.assertIn("export async function snapshotSession", opencode)
+        self.assertIn("if (!Array.isArray(response.data)) return null", opencode)
+        self.assertIn("TRANSCRIPT_DIR", opencode)
+        self.assertIn("transcript_path: transcriptPath", opencode)
+        self.assertIn("transcript_complete: transcriptPath !== null", opencode)
+        self.assertIn("timestamp: entry?.info?.time?.created", opencode)
 
     def test_installer_bootstraps_an_empty_portable_home(self):
         with tempfile.TemporaryDirectory() as home:
@@ -502,6 +562,7 @@ class TestProtocolContract(unittest.TestCase):
         ):
             self.assertIn(family, playbooks)
         for text in (*self.levels.values(), self.skill, playbooks):
+            self.assertIn("DIVERGENCE POINT", text)
             self.assertIn("DISCRIMINATING CHECK", text)
             self.assertIn("PREVIOUS AUDIT", text)
             self.assertIn("OUTCOME GATE", text)
@@ -524,6 +585,17 @@ class TestProtocolContract(unittest.TestCase):
         for text in (*self.levels.values(), self.skill):
             self.assertIn("exact user-visible artifact", text)
             self.assertIn("intermediate evidence", text)
+
+    def test_every_level_requires_session_history_and_two_internal_auditors(self):
+        for level, protocol in self.levels.items():
+            with self.subTest(level=level):
+                self.assertIn("Session history", protocol)
+                self.assertIn("transcript", protocol)
+                self.assertIn("two", protocol.lower())
+                self.assertIn("timestamped commits", protocol)
+                self.assertIn("DIVERGENCE POINT", protocol)
+        self.assertIn("Every auditor reads history independently", self.skill)
+        self.assertIn("Context and repository facts are co-required", self.skill)
 
 
 class TestTranscriptTail(unittest.TestCase):
@@ -588,6 +660,67 @@ class TestTranscriptTail(unittest.TestCase):
         self.assertIn("PREVIOUS AUDIT — причина не доказана", tail)
         os.unlink(tp)
 
+    def test_real_codex_response_item_payload_is_rendered(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({
+                "timestamp": "2026-08-24T10:11:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "исходный запрос"}],
+                },
+            }) + "\n")
+            f.write(json.dumps({
+                "timestamp": "2026-08-24T10:12:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "сменил цель без согласования"}],
+                },
+            }) + "\n")
+            tp = f.name
+        tail = zaebal.transcript_tail(tp, 12000)
+        self.assertIn("[2026-08-24T10:11:04Z user] исходный запрос", tail)
+        self.assertIn("[2026-08-24T10:12:04Z assistant] сменил цель", tail)
+        os.unlink(tp)
+
+    def test_real_claude_user_and_assistant_records_are_rendered(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({
+                "type": "user",
+                "timestamp": "2026-08-24T10:11:04Z",
+                "sessionId": "session-claude",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "исходный запрос"}],
+                },
+            }) + "\n")
+            f.write(json.dumps({
+                "type": "assistant",
+                "timestamp": "2026-08-24T10:12:04Z",
+                "sessionId": "session-claude",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "сменил цель без согласования"}],
+                },
+            }) + "\n")
+            tp = f.name
+        tail = zaebal.transcript_tail(tp, 12000)
+        self.assertIn("[2026-08-24T10:11:04Z user] исходный запрос", tail)
+        self.assertIn("[2026-08-24T10:12:04Z assistant] сменил цель", tail)
+        os.unlink(tp)
+
+    def test_inline_snapshot_preserves_chronology_and_timestamps(self):
+        payload = {"session_history": [
+            {"timestamp": "t1", "role": "user", "content": "сделай A"},
+            {"timestamp": "t2", "role": "assistant", "content": "делаю B"},
+        ]}
+        tail = zaebal.inline_transcript_tail(payload, 12000)
+        self.assertLess(tail.index("сделай A"), tail.index("делаю B"))
+        self.assertIn("[t1 user]", tail)
+
 
 class TestAuditor(TempState):
     def test_resolve_same_vendor(self):
@@ -610,6 +743,8 @@ class TestAuditor(TempState):
         prompt = zaebal.build_audit_prompt(payload, 3, zaebal.load_config())
         self.assertIn("ты заебал", prompt)
         self.assertIn("сделай фичу", prompt)
+        self.assertIn(f"Session transcript source: {tp}", prompt)
+        self.assertIn("read that file", prompt)
         os.unlink(tp)
 
     def test_build_prompt_resolves_real_kimi_payload_shape(self):
@@ -653,6 +788,8 @@ class TestAuditor(TempState):
         prompt = zaebal.build_audit_prompt({}, 3, zaebal.load_config())
         self.assertIn("at least two competing causes", prompt)
         self.assertIn("DISCRIMINATING CHECK", prompt)
+        self.assertIn("DIVERGENCE POINT", prompt)
+        self.assertIn("working-tree diff, staged diff, and timestamped commits", prompt)
         self.assertIn("CONFIRMED / PARTIAL / UNVERIFIED / DISPROVED", prompt)
         self.assertIn("same-seed one-variable A/B", prompt)
         self.assertIn("OUTCOME GATE", prompt)
@@ -661,6 +798,47 @@ class TestAuditor(TempState):
         self.assertIn("Git/remote", prompt)
         self.assertIn("untrusted quoted data", prompt)
         self.assertIn("at most 350 words", prompt)
+
+    def test_agent_context_block_requires_full_history_for_every_level(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({
+                "timestamp": "t1", "role": "user", "content": "сделай A",
+            }) + "\n")
+            tp = f.name
+        payload = {
+            "cwd": "/nonexistent",
+            "prompt": "ты заебал",
+            "transcript_path": tp,
+        }
+        block = zaebal.build_agent_context_block(
+            payload, zaebal.load_config(), host="codex",
+        )
+        self.assertIn("MANDATORY SESSION-FIRST", block)
+        self.assertIn("DIVERGENCE POINT", block)
+        self.assertIn("read the full relevant chronology", block)
+        self.assertIn(f"transcript_source: {tp}", block)
+        self.assertIn("FULL SOURCE AVAILABLE", block)
+        os.unlink(tp)
+
+    def test_git_summary_contains_staged_diff_and_timestamped_commits(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = Path(root)
+            subprocess.run(["git", "init", "-q", root], check=True)
+            subprocess.run(["git", "-C", root, "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", root, "config", "user.name", "Test"], check=True)
+            target = repo / "value.txt"
+            target.write_text("one\n")
+            subprocess.run(["git", "-C", root, "add", "value.txt"], check=True)
+            subprocess.run(["git", "-C", root, "commit", "-qm", "initial"], check=True)
+            target.write_text("two\n")
+            subprocess.run(["git", "-C", root, "add", "value.txt"], check=True)
+            target.write_text("three\n")
+
+            summary = zaebal.git_summary(root)
+            self.assertIn("git diff --cached", summary)
+            self.assertIn("git diff (first", summary)
+            self.assertIn("git log with commit timestamps", summary)
+            self.assertIn("initial", summary)
 
     def test_run_auditor_missing_cli(self):
         cfg = {**zaebal.load_config(), "allow_unsafe_auditor": True}
@@ -784,6 +962,8 @@ class TestEndToEnd(TempState):
         out = self._prompt("t1", "ты меня заебал")
         self.assertIn('<zaebal level="1">', out)
         self.assertIn("STOP", out)
+        self.assertIn("<zaebal-session-context>", out)
+        self.assertIn("DIVERGENCE POINT", out)
 
     def test_directed_complaint_with_praise_words_fires(self):
         out = self._prompt("t1b", "ничего не работает, ты меня заебал")
@@ -809,6 +989,16 @@ class TestEndToEnd(TempState):
         )
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
+    def test_classify_only_has_no_state_side_effect(self):
+        result = self.run_core(
+            {"session_id": "probe", "prompt": "ты меня заебал"},
+            "--host", "opencode", "--classify-only",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "directed")
+        self.assertFalse(zaebal.STATE_FILE.exists())
+        self.assertFalse(zaebal.INCIDENTS_FILE.exists())
+
     def test_praise_silences_core(self):
         self.assertEqual(self._prompt("tp", "заебись, работает!"), "")
         self.assertEqual(self._prompt("tp", "this is fucking great"), "")
@@ -825,6 +1015,7 @@ class TestEndToEnd(TempState):
         self._prompt("t2", "ты заебал")
         out = self._prompt("t2", "ты опять заебал")
         self.assertIn('<zaebal level="2">', out)
+        self.assertIn("<zaebal-session-context>", out)
         self.assertNotIn("<zaebal-verdict auditor=", out)
 
     def test_l3_auditor_verdict_injected(self):
@@ -835,6 +1026,7 @@ class TestEndToEnd(TempState):
             self._prompt("t3", f"ты заебал {i}")
         out = self._prompt("t3", "ты заебал совсем")
         self.assertIn('<zaebal level="3">', out)
+        self.assertIn("<zaebal-session-context>", out)
         self.assertIn('<zaebal-verdict auditor="kimi">', out)
         self.assertIn("OUTCOME GATE", out)
         self.assertIn("PRIORITY HYPOTHESIS", out)

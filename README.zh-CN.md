@@ -78,7 +78,8 @@ Z.A.E.B.A.L. 在用户消息入口加入反馈闭环：
 | 意图分类 | 在修改连续触发状态前，区分正面评价、定向抱怨与不明确的情绪表达。 | `classify()`；权重 `0`、`1.0`、`0.5` |
 | 会话级升级 | 在 30 分钟滑动窗口内按会话记录信号，并选择 L1、L2 或 L3。 | 原子 JSON 状态 + POSIX `fcntl` 锁 |
 | 三层审计协议 | 注入逐渐严格的指令：独立检查、假设清单与完全停止。 | `core/protocol/L1.md` → `L3.md` |
-| 外部审计智能体 | 使用同厂商或跨厂商 CLI 检查会话尾部与仓库证据。 | Claude、Codex、Kimi 或 OpenCode |
+| 会话优先证据 | 要求工作智能体和两个内部审计智能体按时间顺序阅读会话、定位首次偏离，并与 diff 和带时间戳的提交对应。 | 会话路径 + 有界摘录 + Git 时间线 |
+| 外部审计智能体 | 使用同厂商或跨厂商 CLI 检查会话源、定位摘录与仓库证据。 | Claude、Codex、Kimi 或 OpenCode |
 | 四个宿主适配器 | 在 Claude Code、Codex CLI、Kimi CLI 与 OpenCode 提交用户消息时触发。 | JSON hooks、TOML hook 或 TypeScript plugin |
 | 明确恢复机制 | 只有收到 `continue`、`продолжай` 或 `по плану` 等确认才关闭事件。 | 每个会话独立的状态生命周期 |
 | 元数据事件日志 | 记录 trigger、auditor、verdict 与 ack，不保存消息内容。 | `~/.zaebal/incidents.jsonl` |
@@ -115,9 +116,9 @@ normalize → detect → classify
 
 | 级别 | 连续权重 | 智能体行为 | 外部审计 |
 |---|---:|---|---|
-| **L1** | `1–1.5` | 停止，执行两次独立检查，列出假设并准备微型计划。 | 可选 |
-| **L2** | `2–3.5` | 移除未经验证的假设，并把当前工作与原始需求逐项比较。 | 默认关闭 |
-| **L3** | `4+` | 停止所有智能体与后台任务，向用户展示错误假设、证据和偏差。 | 默认尝试；不安全的内置审计器会被拒绝 |
+| **L1** | `0.5–1.5` | 阅读会话历史、定位首次偏离、执行两次独立内部审计并准备微型计划。 | 可选 |
+| **L2** | `2–3.5` | 重读会话时间线，启动两个新的内部审计，复核上次结论，并与原始需求逐项比较。 | 默认关闭 |
+| **L3** | `4+` | 停止所有非审计工作；执行两个内部审计及配置的外部审计，把完整触发序列与 Git 时间线对应，并等待确认。 | 默认尝试；不安全的内置审计器会被拒绝 |
 
 定向抱怨增加 `1.0`，没有检测到对象的粗口增加 `0.5`。窗口为 30 分钟。普通问题
 不会重置状态；正面评价也不会重置，只有明确同意继续才会重置。
@@ -188,7 +189,8 @@ scripts/kimi-host-canary.sh
   "auditor_timeout_sec": 90,
   "auditor_command": "",
   "allow_unsafe_auditor": false,
-  "transcript_tail_chars": 12000
+  "transcript_tail_chars": 12000,
+  "agent_context_tail_chars": 2500
 }
 ```
 
@@ -199,7 +201,8 @@ scripts/kimi-host-canary.sh
 | `auditor_timeout_sec` | `90` | 等待审计结果的最长秒数。 |
 | `auditor_command` | `""` | 自定义命令；审计 prompt 会作为最后一个参数加入。 |
 | `allow_unsafe_auditor` | `false` | 允许没有强制只读模式的内置 Kimi/OpenCode 审计器。优先使用 Claude/Codex 或 sandboxed `auditor_command`。 |
-| `transcript_tail_chars` | `12000` | 发送给审计器的最大会话尾部字符数。 |
+| `transcript_tail_chars` | `12000` | 发送给审计器的最大定位摘录；可读取的会话文件路径仍是权威历史。 |
+| `agent_context_tail_chars` | `2500` | 每一级注入给工作智能体的会话定位摘录大小；若存在会话文件路径，所有审计参与者必须读取该源文件。 |
 
 示例：让 Claude 审计 Codex 会话。
 
@@ -240,6 +243,7 @@ Python 核心是运行时行为的唯一来源。宿主适配器只负责把各�
 ├── config.json    # 可选用户覆盖配置
 ├── state.json     # 按会话保存的加权触发历史
 ├── incidents.jsonl # 不含消息内容的 trigger/ack 事件
+├── transcripts/opencode/ # OpenCode 审计使用的私有文本快照
 └── state.lock     # 并发 hook 使用的 POSIX 锁
 ```
 
@@ -265,6 +269,8 @@ python3 -m unittest test_zaebal -v
 - 状态锁使用 POSIX `fcntl`；Windows 上的并发 hook 可能丢失更新。
 - 内置 Kimi 与 OpenCode 审计器没有强制只读模式，因此默认拒绝运行；
   `allow_unsafe_auditor: true` 是显式 unsafe opt-in。
+- 检测到触发时，OpenCode 适配器会把会话消息以 `0600` 权限保存到
+  `~/.zaebal/transcripts/opencode/`，直到卸载或手动清理。
 - 外部审计是同步的；在启用的级别上，用户需要等待审计结果或超时。
 
 ## 卸载

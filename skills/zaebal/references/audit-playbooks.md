@@ -3,19 +3,23 @@
 Use one primary playbook and any secondary playbook that the failure crosses. Do not run every check mechanically. The common output is:
 
 1. `CONTRACT` — literal request and observed failure.
-2. `FACTS` — each fact names its artifact.
-3. `HYPOTHESES` — at least two competing causes unless direct evidence is conclusive.
-4. `DISCRIMINATING CHECK` — smallest check that produces different expected results for the causes. During a read-only stop, inspect existing evidence only; prescribe any new run/mutation as a post-ack next check.
-5. `PREVIOUS AUDIT` — quote any earlier causal conclusion, its current status, and the evidence gate it skipped.
-6. `WRONG BELIEF` — established only after that check; otherwise `not established`.
-7. `STATUS` — `CONFIRMED`, `PARTIAL`, `UNVERIFIED`, or `DISPROVED`.
-8. `OUTCOME GATE` — exact user-visible artifact that proves the requested result.
+2. `DIVERGENCE POINT` — earliest relevant conversation turn (quote plus timestamp/order), the mismatch introduced there, and the corresponding diff/commit evidence. If history is incomplete, use `not established`.
+3. `FACTS` — each fact names a conversation or repository artifact.
+4. `HYPOTHESES` — at least two competing causes unless direct evidence is conclusive.
+5. `DISCRIMINATING CHECK` — smallest check that produces different expected results for the causes. During a read-only stop, inspect existing evidence only; prescribe any new run/mutation as a post-ack next check.
+6. `PREVIOUS AUDIT` — quote any earlier causal conclusion, its current status, and the evidence gate it skipped.
+7. `WRONG BELIEF` — established only after that check; otherwise `not established`.
+8. `STATUS` — `CONFIRMED`, `PARTIAL`, `UNVERIFIED`, or `DISPROVED`.
+9. `OUTCOME GATE` — exact user-visible artifact that proves the requested result.
+
+For every playbook, inspect the session chronology before interpreting runtime artifacts. Map request/decision/action turns to working-tree and staged diffs and to timestamped commits. Context explains why an artifact exists; the artifact proves what actually changed. Neither evidence track may replace the other.
 
 ## Code and runtime
 
 Use for bugs, tests, services, containers, deploys, and “works locally but not for the user.”
 
 - Reproduce the exact failing path, not a nearby unit or helper.
+- Find the conversation turn that selected or justified the failing implementation, then match it to the diff/commit that introduced it.
 - Map the request to the process that actually handles it. Enumerate duplicate local and in-scope server processes, containers, ports, routes, images, worktrees, and credentials.
 - Compare source → built artifact → installed/deployed artifact by version or hash.
 - Treat a passing unit test, green healthcheck, or quiet log as intermediate evidence only.
@@ -28,6 +32,7 @@ Example: “the new code is deployed” is a hypothesis until the process receiv
 Use for AGENTS.md, skills, hooks, config files, PATH, env variables, and startup settings.
 
 - Find the active home/config root, including overrides such as `KIMI_CODE_HOME` or container env.
+- Match the conversation's claimed target path and reload assumption to the actual config diff and commit chronology.
 - Prove the host parsed and registered the entry with its own diagnostics/list command.
 - Identify reload semantics: immediate, new process, new session, or full restart.
 - Run a unique canary through the host boundary and find the corresponding hook/log/incident artifact.
@@ -40,6 +45,7 @@ Example: a TOML block existing under `~/.kimi-code` does not prove Kimi loaded i
 Use for commits, pushes, branches, PRs, and “my changes disappeared.”
 
 - Record worktree status, current branch, upstream, remotes, and ahead/behind state.
+- Align commit timestamps and diffs with the session turn that requested or claimed each change; do not infer intent from Git alone.
 - Distinguish working-tree content, index content, local commit, remote branch, and PR head.
 - Verify the remote object after push (`ls-remote`, provider API, or fresh fetch), not only the local command's exit code.
 - Check that ignored/untracked/generated files required by the contract are actually included.
@@ -50,6 +56,7 @@ Use for commits, pushes, branches, PRs, and “my changes disappeared.”
 Use for articles, prompts, plans, translations, summaries, structured output, and literal formatting constraints.
 
 - Build a requirement → output-evidence table. Include voice, audience, length, format, forbidden material, and every literal constraint.
+- Trace each requirement to the first session turn where it was accepted, changed, omitted, or contradicted.
 - Separate source-backed claims from invented claims. Flag fabricated first-person experience, metrics, quotes, links, or product behavior.
 - Compare action density with introductory/background “water”; ensure the deliverable starts where the user asked it to start.
 - Verify physical formatting when relevant (one line, JSON schema, headings, character limit), not just semantic intent.
@@ -60,6 +67,7 @@ Use for articles, prompts, plans, translations, summaries, structured output, an
 Use when multiple workflows, models, branches, hosts, tabs, files, servers, or user personas are in play.
 
 - Quote the last explicit selection and timestamp/order: workflow, model/checkpoint, branch/worktree, host, tab, target file, account, or environment.
+- Start from the original request and find the earliest unapproved context switch, then match it to subsequent file or commit changes.
 - Compare it with the target of every subsequent action. Do not infer a switch from convenience or recency.
 - When UI and filesystem disagree, inspect both and identify which one the action actually mutated.
 - Outcome gate: the final artifact comes from the explicitly selected context, or the user explicitly approves a switch.

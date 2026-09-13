@@ -1,9 +1,33 @@
 ---
 name: zaebal
-description: Z.A.E.B.A.L. self-audit protocol (Zaebal? Audit. Errors. Break. Analyze. Leave no assumption). Use when the user swears at the agent or curses it out — stop all agents, run an independent audit, find the wrong belief, notify the human. The escalation level depends on the profanity streak; at level 3 the audit is done by an external agent. Also contains the plugin configuration reference.
+description: Z.A.E.B.A.L. self-audit protocol (Zaebal? Audit. Errors. Break. Analyze. Leave no assumption). Use when the user swears at the agent or curses it out — stop all agents, run an independent audit, find the wrong belief, notify the human. The escalation level depends on the profanity streak; at level 3 the audit is done by an external agent. Also use for requested hook setup on Linux or Windows and plugin configuration.
 ---
 
 # Z.A.E.B.A.L. — self-audit protocol
+
+## Installing or updating the automatic hook
+
+Use this section only when the user asks to install, update, or remove the
+automatic hook. Reading this skill to perform an audit does not install anything.
+
+Determine the OS of the **target agent process**, then read only its reference:
+
+- Native Windows: [Windows hook setup](references/install-windows.md).
+- Linux (including an agent running inside WSL): [Linux hook setup](references/install-linux.md).
+
+Select the host the user actually uses. Register only that host's hook and the
+shared Python core; do not install another OS's tooling or all available hosts.
+Record the selected launch command during setup. Do not repeat OS selection on
+each trigger. Both platforms use the same protocol, wordlists and state format.
+If only this skill folder was downloaded, obtain the matching repository version
+as described in the selected reference; the skill alone is not the hook runtime.
+For other operating systems, consult the repository's existing host instructions
+without claiming they were verified by the Linux/Windows checks.
+
+Installing/updating a hook and confirming that the host actually consumes it are
+separate checks. Report the direct smoke result and host activation separately.
+
+## Audit protocol
 
 **Z**aebal? **A**udit. **E**rrors. **B**reak. **A**nalyze. **L**eave no assumption.
 
@@ -142,7 +166,7 @@ If the user asks what can be configured in Z.A.E.B.A.L. — explain using this r
 | Key | Default | What it does |
 |---|---|---|
 | `auditor` | `"same"` | Who audits the agent (by default — at level 3): `"same"` — the same vendor, or a specific CLI. Built-in Kimi/OpenCode audit visibly degrades unless unsafe mode is enabled; `"none"` disables external audit. |
-| `auditor_command` | `""` | Custom auditor command instead of the built-in ones; the prompt is appended as the last argument |
+| `auditor_command` | `""` | Custom auditor command (legacy POSIX string or argv array); the prompt is appended as the last argument. Prefer an array for Windows paths. |
 | `allow_unsafe_auditor` | `false` | Explicitly allow built-in Kimi/OpenCode auditors despite their lack of enforced read-only mode. Prefer Claude/Codex or a sandboxed custom command. |
 | `audit_levels` | `[3]` | At which levels to call the external auditor (the call is synchronous — the user waits). `[2, 3]` — more often, `[]` — never |
 | `auditor_timeout_sec` | `90` | How long the hook waits for the verdict (the user waits during this) |

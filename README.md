@@ -78,7 +78,7 @@ show whether a discipline-based STOP remains insufficient.
 |---|---|---|
 | Multilingual detection | Detects Russian, English, and Chinese profanity, including punctuation-separated and common leetspeak forms. | `core/wordlists/{ru,en,zh}.txt` + NFKC normalization |
 | Intent classification | Separates praise, directed complaints, and ambiguous frustration before changing the streak. | `classify()`; weights `0`, `1.0`, and `0.5` |
-| Session escalation | Tracks each session in a 30-minute sliding window and selects L1, L2, or L3. | Atomic JSON state + POSIX `fcntl` lock |
+| Session escalation | Tracks each session in a 30-minute sliding window and selects L1, L2, or L3. | Atomic JSON state + native `fcntl` / `msvcrt` lock |
 | Three audit protocols | Injects increasingly strict instructions: independent checks, assumption inventory, and full stop. | `core/protocol/L1.md` → `L3.md` |
 | Session-first evidence | Requires the working agent and two internal auditors to read the chronology, locate the first divergence, and correlate it with diffs and timestamped commits. | Transcript locator + bounded excerpt + Git chronology |
 | External auditor | Runs the same or a cross-vendor CLI against the session source, an orientation excerpt, and repository evidence. | Claude, Codex, Kimi, or OpenCode |
@@ -127,6 +127,22 @@ The window is 30 minutes. Calm questions and praise do not reset it. Only an exp
 continuation-bearing acknowledgment does.
 
 ## Install
+
+### Agent-guided Linux / Windows setup
+
+For a single-host setup, read the installation router in
+[`skills/zaebal/SKILL.md`](skills/zaebal/SKILL.md). The installing agent reads
+only the reference for the target process OS, selects the requested host and
+registers its command once. Native Windows needs neither WSL nor Bash; Linux
+needs no Windows tooling. The shared runtime uses Python 3.10+ stdlib only.
+
+The new selected-host helper supports **Codex on native Windows and Linux**.
+Existing Linux integrations for Claude, Kimi and OpenCode remain unchanged;
+this does not claim native Windows validation for those hosts. Platform smoke
+checks execute the installed command in temporary configuration/state, without
+calling a model. A live host activation check is a separate step.
+
+### Existing multi-host Unix installer
 
 Requirements:
 

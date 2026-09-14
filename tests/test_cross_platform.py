@@ -10,12 +10,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 sys.path.insert(0, str(ROOT / "scripts"))
 import install_codex_hook as installer
 import zaebal
+from platform_runtime import state_lock
 
 
 class TestCrossPlatform(unittest.TestCase):
@@ -101,6 +103,39 @@ class TestCrossPlatform(unittest.TestCase):
             installer.install(self.config, self.dest)
         self.assertEqual(self.config.read_text(encoding="utf-8"), "{broken")
         self.assertFalse(self.dest.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX file permissions")
+    def test_hook_config_backup_is_private(self):
+        installer.write_json(self.config, {"hooks": {}})
+        self.config.chmod(0o600)
+        result = installer.install(self.config, self.dest)
+        self.assertEqual(Path(result["backup"]).stat().st_mode & 0o777, 0o600)
+
+    def test_outside_edit_during_serialization_is_preserved(self):
+        installer.write_json(self.config, {"hooks": {}})
+        changed = b'{"hooks": {}, "description": "new outside edit"}'
+        dump = json.dump
+
+        def edit_config(*args, **kwargs):
+            self.config.write_bytes(changed)
+            return dump(*args, **kwargs)
+
+        with mock.patch.object(installer.json, "dump", side_effect=edit_config):
+            with self.assertRaisesRegex(RuntimeError, "config changed"):
+                installer.install(self.config, self.dest)
+        self.assertEqual(self.config.read_bytes(), changed)
+
+    def test_setup_waits_for_other_setup_to_release_config(self):
+        command = [sys.executable, str(ROOT / "scripts" / "install_codex_hook.py"),
+                   "--platform", "windows" if os.name == "nt" else "linux",
+                   "--config", str(self.config), "--dest", str(self.dest)]
+        with state_lock(self.config.with_name(self.config.name + ".zaebal.lock")):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                subprocess.run(command, capture_output=True, timeout=1)
+            self.assertFalse(self.config.exists())
+        result = subprocess.run(command, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.config.exists())
 
     def test_custom_auditor_argv_preserves_unicode_and_arguments(self):
         # A local stand-in exercises the process boundary without calling a model.

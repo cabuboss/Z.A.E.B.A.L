@@ -268,7 +268,7 @@ Runtime state is stored under `~/.zaebal/`:
 ├── state.json     # per-session weighted trigger history
 ├── incidents.jsonl # metadata-only trigger and acknowledgment events
 ├── transcripts/opencode/ # private text snapshots used as OpenCode audit context
-└── state.lock     # POSIX lock for concurrent hooks
+└── state.lock     # native lock for concurrent hooks
 ```
 
 The auditor subprocess receives `ZAEBAL_INTERNAL=1`, preventing the globally installed
@@ -292,7 +292,8 @@ end-to-end protocol injection.
   or false negatives.
 - The detector does not identify non-profane action loops; adding a general loop detector
   would be a separate product with its own false-positive model.
-- State locking uses POSIX `fcntl`; concurrent hooks on Windows can lose updates.
+- Native Windows host integration is currently verified for Codex only; other hosts
+  require their own adapter validation. State locking uses native `fcntl` / `msvcrt`.
 - Built-in Kimi and OpenCode auditors have no enforced read-only mode and are refused by
   default. `allow_unsafe_auditor: true` is an explicit unsafe opt-in.
 - On a detected trigger, the OpenCode adapter stores a mode-`0600` text snapshot of the

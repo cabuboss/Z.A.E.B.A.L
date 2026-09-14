@@ -28,6 +28,9 @@ the agent itself runs there. Do not install WSL, Bash, or Linux packages.
    for isolated checks or non-default installations. Existing unrelated hooks,
    user configuration and incident history are preserved. A unique config backup
    path is printed. Repeating installation replaces this hook, not duplicates it.
+   Close editors changing `hooks.json` during setup. Concurrent helper runs are
+   serialized; outside edits detected before replacement abort the update, but
+   uncoordinated external editors do not share its lock.
 4. Native Windows registration for Claude/Kimi/OpenCode is **not established by
    this helper**. Do not write a Codex hook into their configuration or silently
    switch to WSL. Inspect the selected host's current Windows hook contract before

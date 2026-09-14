@@ -12,11 +12,10 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
-from platform_runtime import shell_command
+from platform_runtime import shell_command, state_lock
 
 MARKER = "Z.A.E.B.A.L. self-audit"
 
@@ -28,13 +27,17 @@ def is_ours(handler):
     return handler.get("command") == "python3 ~/.zaebal/core/zaebal.py --host codex"
 
 
-def write_json(path, data):
+def write_json(path, data, expected=Ellipsis):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+        if expected is not Ellipsis:
+            current = path.read_bytes() if path.exists() else None
+            if current != expected:
+                raise RuntimeError("hook config changed during installation; retry after review")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -42,6 +45,12 @@ def write_json(path, data):
 
 
 def install(config, dest, remove=False):
+    # Other setup runs share this lock; external editors must stay closed.
+    with state_lock(config.with_name(config.name + ".zaebal.lock")):
+        return _install(config, dest, remove)
+
+
+def _install(config, dest, remove):
     original = config.read_bytes() if config.exists() else None
     if remove and original is None:
         return {"config": str(config), "backup": None, "command": None, "removed": True}
@@ -79,15 +88,14 @@ def install(config, dest, remove=False):
             raise ValueError("runtime destination must differ from source checkout")
         shutil.copytree(ROOT / "core", dest / "core", dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    # Abort rather than overwrite a concurrent editor's configuration.
-    current = config.read_bytes() if config.exists() else None
-    if current != original:
-        raise RuntimeError("hook config changed during installation; retry after review")
     backup = None
     if original is not None:
-        backup = config.with_name(config.name + ".zaebal-" + uuid.uuid4().hex[:8] + ".bak")
-        backup.write_bytes(original)
-    write_json(config, data)
+        fd, backup_name = tempfile.mkstemp(prefix=config.name + ".zaebal-",
+                                           suffix=".bak", dir=config.parent)
+        backup = Path(backup_name)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(original)
+    write_json(config, data, expected=original)
     return {"config": str(config), "backup": str(backup) if backup else None,
             "command": command, "removed": remove}
 

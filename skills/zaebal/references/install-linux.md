@@ -23,6 +23,10 @@ paths for isolated checks. It preserves unrelated hooks, user settings and
 incident history, and prints a unique config backup. Reinstall replaces its own
 entry. No Windows adapter or dependency is installed.
 
+Close editors changing `hooks.json` during setup. Concurrent runs of this helper
+are serialized; outside edits detected before replacement abort the update, but
+uncoordinated external editors do not share its lock.
+
 Run the short platform smoke:
 
 ```sh

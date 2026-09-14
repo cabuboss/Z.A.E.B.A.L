@@ -32,10 +32,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-try:
-    import fcntl  # POSIX only; state locking degrades gracefully without it
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from platform_runtime import shell_command, state_lock, sync_directory
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get("ZAEBAL_STATE_DIR", str(Path.home() / ".zaebal")))
@@ -451,7 +448,10 @@ def validate_config(cfg):
         out["audit_levels"] = sorted(set(levels))
 
     command = cfg.get("auditor_command", out["auditor_command"])
-    if isinstance(command, str):
+    if isinstance(command, str) or (
+        isinstance(command, list) and command
+        and all(isinstance(arg, str) and arg for arg in command)
+    ):
         out["auditor_command"] = command
     unsafe = cfg.get("allow_unsafe_auditor", out["allow_unsafe_auditor"])
     if isinstance(unsafe, bool):
@@ -489,12 +489,8 @@ def _save_state(state):
             json.dump(state, fh)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, STATE_FILE)  # atomic on POSIX
-        dir_fd = os.open(STATE_DIR, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        os.replace(tmp, STATE_FILE)
+        sync_directory(STATE_DIR)
         return True
     except Exception:
         return False  # fail-open for hooks; callers needing durability inspect it
@@ -507,21 +503,8 @@ def _locked():
     Parallel hooks (several CLI instances, or parallel hook rules) otherwise
     lose triggers: each reads, appends, and overwrites the other's write.
     """
-    if fcntl is None:
+    with state_lock(STATE_LOCK):
         yield
-        return
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        fh = open(STATE_LOCK, "w")
-    except Exception:
-        yield  # fail-open: no lock is better than no protocol
-        return
-    with fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _session_entry(state, session_id):
@@ -867,7 +850,7 @@ def git_summary(cwd, diff_chars=4000, log_count=12):
         try:
             r = subprocess.run(
                 ["git", "-C", cwd, *args],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
             return r.stdout.strip()
         except Exception:
@@ -1015,8 +998,12 @@ def _markup_safe(text):
 
 def run_auditor(auditor, prompt, cfg):
     """Run the external auditor CLI. Returns (verdict, error). Exactly one is set."""
-    custom = str(cfg.get("auditor_command", "")).strip()
-    if custom:
+    custom = cfg.get("auditor_command", "")
+    if isinstance(custom, list):
+        cmd = custom + [prompt]
+    elif str(custom).strip():
+        # Existing POSIX strings remain supported. On Windows use argv arrays
+        # for paths with spaces/backslashes, without invoking a command shell.
         cmd = shlex.split(custom) + [prompt]
     else:
         if not auditor_will_invoke(auditor, cfg):
@@ -1032,11 +1019,11 @@ def run_auditor(auditor, prompt, cfg):
     try:
         r = subprocess.run(
             cmd,
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=int(cfg.get("auditor_timeout_sec", 90)),
             # the auditor's own prompt contains the user's verbatim profanity;
             # this flag keeps a globally installed zaebal hook from firing on it
-            env={**os.environ, CHILD_ENV_FLAG: "1"},
+            env={**os.environ, CHILD_ENV_FLAG: "1", "PYTHONUTF8": "1"},
         )
     except FileNotFoundError:
         return None, f"auditor CLI '{auditor}' not found in PATH"
@@ -1135,7 +1122,10 @@ def mode_prompt(host, payload):
         verdict_received=verdict_received,
         trigger_id=trigger_id,
     )
-    dismiss = "python3 ~/.zaebal/core/zaebal.py --dismiss-trigger=" + trigger_id
+    dismiss = shell_command([
+        sys.executable, "-X", "utf8", str(BASE_DIR / "zaebal.py"),
+        "--dismiss-trigger=" + trigger_id,
+    ])
     protocol = (BASE_DIR / "protocol" / f"L{level}.md").read_text(encoding="utf-8").strip()
     protocol = protocol.replace("{{DISMISS_COMMAND}}", dismiss)
     context_block = build_agent_context_block(payload, cfg, host)
@@ -1147,6 +1137,10 @@ def mode_prompt(host, payload):
 
 
 def main():
+    # Hook JSON and protocol output use UTF-8 even on legacy Windows locales.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     # anti-recursion: never fire inside the auditor's own subprocess
     if os.environ.get(CHILD_ENV_FLAG):
         return 0

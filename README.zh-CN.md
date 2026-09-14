@@ -76,7 +76,7 @@ Z.A.E.B.A.L. 在用户消息入口加入反馈闭环：
 |---|---|---|
 | 多语言检测 | 检测俄语、英语和中文粗口，包括标点拆分与常见字符替换。 | `core/wordlists/{ru,en,zh}.txt` + NFKC 标准化 |
 | 意图分类 | 在修改连续触发状态前，区分正面评价、定向抱怨与不明确的情绪表达。 | `classify()`；权重 `0`、`1.0`、`0.5` |
-| 会话级升级 | 在 30 分钟滑动窗口内按会话记录信号，并选择 L1、L2 或 L3。 | 原子 JSON 状态 + POSIX `fcntl` 锁 |
+| 会话级升级 | 在 30 分钟滑动窗口内按会话记录信号，并选择 L1、L2 或 L3。 | 原子 JSON 状态 + 原生 `fcntl` / `msvcrt` 锁 |
 | 三层审计协议 | 注入逐渐严格的指令：独立检查、假设清单与完全停止。 | `core/protocol/L1.md` → `L3.md` |
 | 会话优先证据 | 要求工作智能体和两个内部审计智能体按时间顺序阅读会话、定位首次偏离，并与 diff 和带时间戳的提交对应。 | 会话路径 + 有界摘录 + Git 时间线 |
 | 外部审计智能体 | 使用同厂商或跨厂商 CLI 检查会话源、定位摘录与仓库证据。 | Claude、Codex、Kimi 或 OpenCode |
@@ -244,7 +244,7 @@ Python 核心是运行时行为的唯一来源。宿主适配器只负责把各�
 ├── state.json     # 按会话保存的加权触发历史
 ├── incidents.jsonl # 不含消息内容的 trigger/ack 事件
 ├── transcripts/opencode/ # OpenCode 审计使用的私有文本快照
-└── state.lock     # 并发 hook 使用的 POSIX 锁
+└── state.lock     # 并发 hook 使用的原生锁
 ```
 
 审计子进程会收到 `ZAEBAL_INTERNAL=1`，因此全局 hook 不会被审计 prompt 中引用的
@@ -266,7 +266,8 @@ python3 -m unittest test_zaebal -v
 - 检测器采用启发式规则；讽刺和特殊上下文仍可能造成误报或漏报。
 - 检测器不会识别不含粗口的动作循环；通用 loop detector 是另一个产品，并有自己
   的误报模型。
-- 状态锁使用 POSIX `fcntl`；Windows 上的并发 hook 可能丢失更新。
+- 原生 Windows 主机集成目前仅验证了 Codex；其他主机的适配器需单独验证。
+  状态锁使用原生 `fcntl` / `msvcrt`。
 - 内置 Kimi 与 OpenCode 审计器没有强制只读模式，因此默认拒绝运行；
   `allow_unsafe_auditor: true` 是显式 unsafe opt-in。
 - 检测到触发时，OpenCode 适配器会把会话消息以 `0600` 权限保存到

@@ -1,4 +1,6 @@
 {
+  "auto_trigger": true,
+  "manual_trigger": true,
   "auditor": "same",
   "audit_levels": [3],
   "auditor_timeout_sec": 90,

@@ -116,6 +116,12 @@ if [ -d "$HOME/.claude" ]; then
   cp -r "$SRC/skills/zaebal" "$HOME/.claude/skills/zaebal"
   echo "[skill]     installed to ~/.claude/skills/zaebal"
 fi
+if [ -d "$KIMI_HOME" ]; then
+  mkdir -p "$HOME/.kimi/skills"
+  rm -rf "$HOME/.kimi/skills/zaebal"
+  cp -r "$SRC/skills/zaebal" "$HOME/.kimi/skills/zaebal"
+  echo "[skill]     installed to ~/.kimi/skills/zaebal"
+fi
 
 echo
 echo "Z.A.E.B.A.L. installed. Restart your agent sessions to pick up the hooks."

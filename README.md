@@ -49,10 +49,17 @@ Z.A.E.B.A.L. adds a feedback loop to the user-message boundary:
 
 - profanity and direct complaints become an audit signal;
 - positive profanity such as “fucking great” is silent and does not add to the streak,
-  but it is not an acknowledgment and does not close an active incident;
+  but does not authorize resuming a level-3 mutation stop;
 - repeated signals escalate from a local protocol to a full stop;
 - at level 3, the hook attempts a technically read-only external audit;
-- work resumes only after an explicit user acknowledgment.
+- at level 3, mutations resume only after an explicit user acknowledgment.
+
+The audit challenges the agent's interpretation; it does not freeze a task contract.
+It asks for a fact that could disprove the explanation, the next action that changes,
+and a check of the actual reported failure. A repeated symptom calls for checking the
+previous audit even without new profanity or after the streak resets/expires.
+Continuation is permission to proceed, not proof of a fix. See the
+[anonymized recovery examples](skills/zaebal/references/recovery-examples.md).
 
 The current release does **not** install a technical tool lock. The protocol changes the
 agent's instructions and asks it to stop; the human always retains the final control.
@@ -80,12 +87,12 @@ show whether a discipline-based STOP remains insufficient.
 | Intent classification | Separates praise, directed complaints, and ambiguous frustration before changing the streak. | `classify()`; weights `0`, `1.0`, and `0.5` |
 | Session escalation | Tracks each session in a 30-minute sliding window and selects L1, L2, or L3. | Atomic JSON state + native `fcntl` / `msvcrt` lock |
 | Three audit protocols | Injects increasingly strict instructions: independent checks, assumption inventory, and full stop. | `core/protocol/L1.md` → `L3.md` |
-| Session-first evidence | Requires the working agent and two internal auditors to read the chronology, locate the first divergence, and correlate it with diffs and timestamped commits. | Transcript locator + bounded excerpt + Git chronology |
+| Session-first evidence | Requires the working agent and two internal auditors to read the chronology, locate the first divergence, and correlate it with diffs and timestamped commits. | Locator first; inline excerpt only when no source file is available |
 | External auditor | Runs the same or a cross-vendor CLI against the session source, an orientation excerpt, and repository evidence. | Claude, Codex, Kimi, or OpenCode |
 | Four host adapters | Hooks Claude Code, Codex CLI, Kimi CLI, and OpenCode at user-message submission. | JSON hooks, TOML hook, or TypeScript plugin |
-| Explicit recovery | Resets the incident only after acknowledgment such as `continue`, `продолжай`, or `по плану`. | Per-session state lifecycle |
+| Explicit continuation | Resets the emotional streak after acknowledgment such as `continue`, `продолжай`, or `по плану`; does not certify resolution. | Existing per-session state |
 | Metadata telemetry | Appends trigger, auditor, verdict, and acknowledgment events without message contents. | `~/.zaebal/incidents.jsonl` |
-| Fail-open safety | A malformed payload, missing auditor, timeout, or internal error never breaks the host session. | Silent exit `0`; auditor errors become context |
+| Fail-open safety | Errors do not block the host session. Trigger/state and telemetry write failures are visible; no rollback token is issued for an unsaved trigger. | Exit `0`; detected persistence/auditor errors become context |
 
 ## How it works
 
@@ -202,11 +209,36 @@ installer creates and uses that directory instead of `~/.kimi-code`.
 
 ## Configuration
 
+Type `zaebal` in the agent chat to view settings. Installation requests, GitHub links,
+and discussion of the skill name do not start an audit. Commands work through the
+shared core on Claude Code, Codex, Kimi CLI, and OpenCode:
+
+| Chat command | Action |
+|---|---|
+| `zaebal` / `zaebal config` | Show settings; no audit |
+| `zaebal auto off` / `zaebal auto on` | Disable / enable automatic profanity triggers |
+| `zaebal manual off` / `zaebal manual on` | Disable / enable explicitly requested audits |
+| `zaebal off` / `zaebal on` | Disable / enable both entry points |
+| `zaebal audit` | Run one manual audit, without increasing the profanity streak |
+
+Settings remain accessible when both switches are off. Bare Russian `заебал` still
+counts as a possible complaint; use Latin `zaebal` for management.
+Native skill entry points use the same routing:
+[Claude Code](https://code.claude.com/docs/en/skills) `/zaebal`,
+[Codex](https://learn.chatgpt.com/docs/build-skills) `$zaebal`,
+[Kimi](https://moonshotai.github.io/kimi-cli/en/customization/skills.html) `/skill:zaebal`;
+in [OpenCode](https://opencode.ai/docs/skills), ask the agent to use `zaebal`.
+Without a running hook, the skill uses `python3 ~/.zaebal/core/zaebal.py --control status`
+or `--control auto off` / `--control manual off`. Kimi also receives a native copy in
+`~/.kimi/skills/zaebal/` so another generic skills directory cannot hide it.
+
 Defaults live in [`core/config.json`](core/config.json). User overrides live in
-`~/.zaebal/config.json` and are loaded on the next trigger:
+`~/.zaebal/config.json` and are loaded on the next message across all hosts:
 
 ```json
 {
+  "auto_trigger": true,
+  "manual_trigger": true,
   "auditor": "same",
   "audit_levels": [3],
   "auditor_timeout_sec": 90,
@@ -219,13 +251,15 @@ Defaults live in [`core/config.json`](core/config.json). User overrides live in
 
 | Key | Default | Meaning |
 |---|---|---|
+| `auto_trigger` | `true` | Automatic profanity detection and implicit audits from the skill. |
+| `manual_trigger` | `true` | Explicit manual audits. Settings/help remain accessible when false. |
 | `auditor` | `"same"` | Same vendor as the host, a specific `kimi` / `claude` / `codex` / `opencode`, or `"none"`. Built-in Kimi/OpenCode auditing degrades visibly unless unsafe mode is explicitly enabled. |
 | `audit_levels` | `[3]` | Levels that synchronously invoke an external auditor. Use `[2, 3]` for earlier audits. |
 | `auditor_timeout_sec` | `90` | Maximum time to wait for the auditor response. |
 | `auditor_command` | `""` | Custom command; the audit prompt is appended as the final argument. |
 | `allow_unsafe_auditor` | `false` | Opt in to built-in Kimi/OpenCode auditors even though those CLIs provide no enforced read-only mode. Prefer Claude/Codex or a sandboxed `auditor_command`. |
 | `transcript_tail_chars` | `12000` | Maximum orientation excerpt sent to the auditor; a readable transcript path remains the authoritative history. |
-| `agent_context_tail_chars` | `2500` | Orientation excerpt injected for the working agent on every level. When a transcript path is available, all audit participants must inspect that source rather than treating the excerpt as complete history. |
+| `agent_context_tail_chars` | `2500` | Maximum inline excerpt when no readable transcript exists. Otherwise the locator is injected first and agents read the source directly. |
 
 Example: use Claude to audit a Codex session:
 

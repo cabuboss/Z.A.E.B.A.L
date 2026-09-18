@@ -12,17 +12,24 @@ else:
     import fcntl
 
 
-def shell_command(argv):
+def shell_command(argv, env=None):
     """Render for the native host shell, without interpreting path contents.
 
     Windows uses an explicit PowerShell launcher so the outer host may use
     either cmd or PowerShell. The encoded script contains only fixed argv;
     the user's hook payload continues to arrive on stdin.
     """
+    env = env or {}
     if os.name != "nt":
-        return shlex.join([str(arg) for arg in argv])
+        prefix = ["env", *(f"{key}={value}" for key, value in env.items())] if env else []
+        return shlex.join([*prefix, *(str(arg) for arg in argv)])
     quoted = " ".join("'" + str(arg).replace("'", "''") + "'" for arg in argv)
-    script = "& " + quoted + "; exit $LASTEXITCODE"
+    assignments = "".join(
+        "[Environment]::SetEnvironmentVariable('" + str(key).replace("'", "''")
+        + "', '" + str(value).replace("'", "''") + "', 'Process'); "
+        for key, value in env.items()
+    )
+    script = assignments + "& " + quoted + "; exit $LASTEXITCODE"
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
 

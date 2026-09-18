@@ -1,3 +1,7 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# Local research can contain private transcripts and filesystem locators.
+/reports/
+/graphify-out/

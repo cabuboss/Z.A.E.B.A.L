@@ -59,6 +59,9 @@ fi
 if [ -d "$HOME/.claude/skills/zaebal" ]; then
   rm -rf "$HOME/.claude/skills/zaebal" && echo "[skill]     removed from ~/.claude/skills"
 fi
+if [ -d "$HOME/.kimi/skills/zaebal" ]; then
+  rm -rf "$HOME/.kimi/skills/zaebal" && echo "[skill]     removed from ~/.kimi/skills"
+fi
 
 if [ -f "$DEST/config.json" ]; then
   cp "$DEST/config.json" "$HOME/zaebal-config.backup.json"

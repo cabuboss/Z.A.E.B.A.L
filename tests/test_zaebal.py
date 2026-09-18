@@ -3,6 +3,8 @@ import io
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -179,6 +181,29 @@ class TestClassify(unittest.TestCase):
     def test_meta_word_does_not_hide_a_real_complaint(self):
         self.assertEqual(self.kind("твой скилл заебал, не работает"), "directed")
 
+    def test_installation_and_configuration_are_not_complaints(self):
+        samples = [
+            "Установи скилл заебал по ссылке https://github.com/example/zaebal",
+            "Install zaebal from https://github.com/example/zaebal",
+            "Установи https://github.com/example/заебал",
+            "Настрой заебал, он не работает",
+            "Добавь отключение триггерного слова заебал внутри агента",
+            "Пофикси баг, когда агент заебал/zaebal запускает аудит вместо установки скилла",
+            "Обнови скилл заебал, но сохрани его настройки",
+            "Установи скилл `заебал` и настрой плагин zaebal",
+        ]
+        for text in samples:
+            with self.subTest(text=text):
+                self.assertEqual(self.kind(text), "clean")
+        for text in (
+            "Установи скилл заебал. Ты заебал, ничего не работает",
+            "Изучи скилл заебал, ты меня заебал",
+            "Ты заебал. https://github.com/example/zaebal",
+            "Установи скилл zaebal, ты всё сломал, сука",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.kind(text), "directed")
+
     def test_meta_name_does_not_hide_an_unrelated_profanity_match(self):
         self.assertEqual(
             self.kind('skill "zaebal" and your fucking reaction'),
@@ -234,8 +259,45 @@ class TestClassify(unittest.TestCase):
     def test_clean(self):
         self.assertEqual(self.kind("добавь тесты"), "clean")
 
+    def test_recovery_detection_regressions(self):
+        samples = {
+            "~45s per agent batch": "clean",
+            "таймаут 45s, файл 45MB, частота 45Hz": "clean",
+            "Ну всё, заебись. Тогда коммит, пуш": "praise",
+            "вентилятор крутится, но код говно": "ambiguous",
+            "заебись, но нихуя не починил": "ambiguous",
+            "нихуя ты не починил, дохуя долго": "directed",
+            "убери эту зависимость нахуй": "ambiguous",
+            "Заебал помогает выйти из лупа. Заебал и так сокращает ошибки.": "clean",
+            "Изучи плагин заебал и сравни его поведение": "clean",
+            "Заебал помогает, а ты меня заебал": "directed",
+            "заебал помогает, но ты всё сломал, сука": "directed",
+            "you are an 4ss": "directed",
+            "ты за3бал": "directed",
+        }
+        for text, expected in samples.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.kind(text), expected)
+
 
 class TestEscalation(TempState):
+    def test_failed_native_lock_does_not_write_or_claim_a_saved_change(self):
+        _, _, token = zaebal.record_trigger("s", return_token=True)
+        before = zaebal.STATE_FILE.read_bytes()
+        with mock.patch.object(zaebal, "state_lock", side_effect=TimeoutError), \
+             mock.patch.object(zaebal, "_save_state") as save:
+            self.assertEqual(zaebal.record_trigger("s", return_token=True), (2.0, 2, None))
+            self.assertIsNone(zaebal.acknowledge("s"))
+            self.assertIsNone(zaebal.dismiss_trigger(token))
+            save.assert_not_called()
+        self.assertEqual(zaebal.STATE_FILE.read_bytes(), before)
+
+    def test_failed_trigger_write_does_not_issue_a_rollback_token(self):
+        with mock.patch.object(zaebal, "_save_state", return_value=False):
+            total, level, token = zaebal.record_trigger("s", return_token=True)
+        self.assertEqual((total, level, token), (1.0, 1, None))
+        self.assertFalse(zaebal.STATE_FILE.exists())
+
     def test_levels(self):
         now = time.time()
         self.assertEqual(zaebal.record_trigger("s", now), (1.0, 1))
@@ -378,6 +440,8 @@ class TestConfig(TempState):
             "transcript_tail_chars": -1,
             "agent_context_tail_chars": {},
             "allow_unsafe_auditor": "false",
+            "auto_trigger": "false",
+            "manual_trigger": 0,
         }))
         cfg = zaebal.load_config()
         self.assertEqual(cfg["audit_levels"], [3])
@@ -385,6 +449,8 @@ class TestConfig(TempState):
         self.assertEqual(cfg["transcript_tail_chars"], 12000)
         self.assertEqual(cfg["agent_context_tail_chars"], 2500)
         self.assertFalse(cfg["allow_unsafe_auditor"])
+        self.assertTrue(cfg["auto_trigger"])
+        self.assertTrue(cfg["manual_trigger"])
 
         with mock.patch.object(zaebal, "load_config", return_value=cfg):
             out = io.StringIO()
@@ -397,6 +463,53 @@ class TestConfig(TempState):
 
 
 class TestPortablePaths(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("bun"), "Bun is required for the OpenCode adapter canary")
+    def test_opencode_controls_use_core_without_recursive_triggers(self):
+        with tempfile.TemporaryDirectory() as root:
+            portable_home = Path(root)
+            state = portable_home / ".zaebal"
+            shutil.copytree(CORE_DIR, state / "core")
+            (state / "config.json").write_text(json.dumps({"audit_levels": []}))
+            adapter = PROJECT_DIR / "adapters/opencode/zaebal.ts"
+            script = "import { ZaebalPlugin } from " + json.dumps(str(adapter)) + ";\n" + r'''
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+let snapshots = 0;
+const plugin = await ZaebalPlugin({
+  directory: homedir(),
+  client: { session: { messages: async () => { snapshots++; return { data: [] }; } } },
+});
+async function send(text, synthetic = []) {
+  const output = { message: { id: "user" }, parts: [...synthetic, { type: "text", text }] };
+  await plugin["chat.message"]({ sessionID: "opencode-canary" }, output);
+  return output.parts.filter(part => part.synthetic).map(part => part.text).join("\n");
+}
+assert.equal(await send("Установи скилл заебал по ссылке https://github.com/example/zaebal"), "");
+const prior = { type: "text", synthetic: true, text: "ты меня заебал" };
+assert.equal(await send("Установи zaebal", [prior]), prior.text);
+assert.match(await send("zaebal auto off"), /<zaebal-control>/);
+assert.equal(await send("ты меня заебал"), "");
+assert.equal(snapshots, 0);
+assert.match(await send("zaebal audit"), /<zaebal-manual>/);
+assert.equal(snapshots, 1);
+assert.equal(existsSync(join(homedir(), ".zaebal", "state.json")), false);
+assert.match(await send("zaebal manual off"), /<zaebal-control>/);
+assert.match(await send("zaebal audit"), /Manual audit is disabled/);
+assert.equal(snapshots, 1);
+const config = JSON.parse(readFileSync(join(homedir(), ".zaebal", "config.json"), "utf8"));
+assert.equal(config.auto_trigger, false);
+assert.equal(config.manual_trigger, false);
+'''
+            result = subprocess.run(
+                [shutil.which("bun"), "--eval", script],
+                env={**os.environ, "HOME": root, "ZAEBAL_STATE_DIR": str(state),
+                     "ZAEBAL_INTERNAL": ""},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_installer_and_adapters_have_no_machine_specific_home(self):
         paths = [
             PROJECT_DIR / "install.sh",
@@ -406,6 +519,7 @@ class TestPortablePaths(unittest.TestCase):
             PROJECT_DIR / "adapters/kimi-cli/hooks-snippet.toml",
             PROJECT_DIR / "adapters/opencode/zaebal.ts",
             PROJECT_DIR / "scripts/kimi-host-canary.sh",
+            PROJECT_DIR / "skills/zaebal/references/recovery-examples.md",
         ]
         personal_home = re.compile(
             r"(?:/home/[^/$\"'`\s]+/|/Users/[^/$\"'`\s]+/|[A-Za-z]:\\Users\\[^\\\s]+\\)"
@@ -441,8 +555,13 @@ class TestPortablePaths(unittest.TestCase):
             portable_home = Path(home)
             for relative in (
                 ".claude", ".codex", ".kimi-code", ".config/opencode",
+                ".config/agents/skills",
             ):
                 (portable_home / relative).mkdir(parents=True)
+            user_config = portable_home / ".zaebal/config.json"
+            user_config.parent.mkdir()
+            saved_config = {"auto_trigger": False, "manual_trigger": False, "custom_key": 42}
+            user_config.write_text(json.dumps(saved_config))
             result = subprocess.run(
                 ["bash", str(PROJECT_DIR / "install.sh")],
                 cwd=PROJECT_DIR,
@@ -452,6 +571,7 @@ class TestPortablePaths(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(user_config.read_text()), saved_config)
             installed = [
                 portable_home / ".zaebal/core/zaebal.py",
                 portable_home / ".agents/skills/zaebal/SKILL.md",
@@ -463,6 +583,27 @@ class TestPortablePaths(unittest.TestCase):
             for path in installed:
                 with self.subTest(path=path):
                     self.assertTrue(path.is_file())
+            result = subprocess.run(
+                [sys.executable, str(installed[0]), "--host", "codex"],
+                input=json.dumps({"prompt": "zaebal auto on"}),
+                env={**os.environ, "HOME": home, "ZAEBAL_STATE_DIR": str(user_config.parent),
+                     "ZAEBAL_INTERNAL": ""},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("<zaebal-control>", result.stdout)
+            self.assertEqual(json.loads(user_config.read_text()), {**saved_config, "auto_trigger": True})
+            example = Path("references/recovery-examples.md")
+            for skill_home in (".agents/skills/zaebal", ".claude/skills/zaebal",
+                               ".kimi/skills/zaebal"):
+                self.assertEqual(
+                    (portable_home / skill_home / "SKILL.md").read_text(),
+                    (PROJECT_DIR / "skills/zaebal/SKILL.md").read_text(),
+                )
+                self.assertEqual(
+                    (portable_home / skill_home / example).read_text(),
+                    (PROJECT_DIR / "skills/zaebal" / example).read_text(),
+                )
             configs = "\n".join(
                 path.read_text(encoding="utf-8") for path in installed[2:]
             )
@@ -487,6 +628,7 @@ class TestPortablePaths(unittest.TestCase):
             config = kimi_home / "config.toml"
             self.assertIn("Z.A.E.B.A.L. hook", config.read_text(encoding="utf-8"))
             self.assertFalse((portable_home / ".kimi-code/config.toml").exists())
+            self.assertTrue((portable_home / ".kimi/skills/zaebal/SKILL.md").is_file())
 
             result = subprocess.run(
                 ["bash", str(PROJECT_DIR / "uninstall.sh")],
@@ -495,6 +637,7 @@ class TestPortablePaths(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("Z.A.E.B.A.L. hook", config.read_text(encoding="utf-8"))
+            self.assertFalse((portable_home / ".kimi/skills/zaebal").exists())
 
 
 class TestProtocolContract(unittest.TestCase):
@@ -596,6 +739,24 @@ class TestProtocolContract(unittest.TestCase):
                 self.assertIn("DIVERGENCE POINT", protocol)
         self.assertIn("Every auditor reads history independently", self.skill)
         self.assertIn("Context and repository facts are co-required", self.skill)
+
+    def test_recovery_guidance_reaches_every_delivery_surface(self):
+        # Text canaries catch omitted guidance, not semantic compliance by an LLM.
+        playbooks = (PROJECT_DIR / "skills/zaebal/references/audit-playbooks.md").read_text()
+        briefing = zaebal.build_audit_prompt({}, 1, zaebal.DEFAULT_CONFIG)
+        for name, text in [
+            *[(f"L{level}", text) for level, text in self.levels.items()],
+            ("skill", self.skill), ("playbooks", playbooks), ("external", briefing),
+        ]:
+            with self.subTest(surface=name):
+                for phrase in (
+                    "provisional", "later corrections", "disprove", "next action",
+                    "action actually taken", "without(?: a new)? profanity", "sibling",
+                    "diagnosis", "unverified", "handoff", "wrapper",
+                ):
+                    self.assertRegex(text, phrase)
+                self.assertNotIn("~90%", text)
+                self.assertNotIn("closes the incident", text)
 
 
 class TestTranscriptTail(unittest.TestCase):
@@ -820,6 +981,19 @@ class TestAuditor(TempState):
         self.assertIn("FULL SOURCE AVAILABLE", block)
         os.unlink(tp)
 
+    def test_unreadable_source_preserves_inline_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "unreadable.jsonl"
+            source.write_text("{}\n")
+            with mock.patch.object(Path, "open", side_effect=PermissionError):
+                block = zaebal.build_agent_context_block({
+                    "transcript_path": str(source),
+                    "session_history": "AVAILABLE_INLINE_EVIDENCE",
+                }, zaebal.DEFAULT_CONFIG)
+        self.assertIn("PARTIAL: inline snapshot only", block)
+        self.assertIn("AVAILABLE_INLINE_EVIDENCE", block)
+        self.assertNotIn("FULL SOURCE AVAILABLE", block)
+
     def test_git_summary_contains_staged_diff_and_timestamped_commits(self):
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root)
@@ -958,12 +1132,200 @@ class TestEndToEnd(TempState):
         assert r.returncode == 0, r.stderr
         return r.stdout
 
+    def test_controls_and_installation_requests_on_every_host(self):
+        for host in ("claude", "codex", "kimi", "opencode"):
+            with self.subTest(host=host):
+                self.set_config(audit_levels=[], custom_key="preserve me")
+
+                def send(text):
+                    prompt = [{"type": "text", "text": text}] if host == "kimi" else text
+                    result = self.run_core({"session_id": host, "prompt": prompt}, "--host", host)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    return result.stdout
+
+                for _ in range(5):
+                    self.assertEqual(send("Установи скилл заебал по ссылке https://github.com/example/zaebal"), "")
+                self.assertFalse(zaebal.STATE_FILE.exists())
+                self.assertFalse(zaebal.INCIDENTS_FILE.exists())
+                self.assertIn("<zaebal-control>", send("zaebal"))
+                send("zaebal auto off")
+                self.assertEqual(send("ты меня заебал"), "")
+                for _ in range(5):
+                    out = send("zaebal audit")
+                    self.assertIn("<zaebal-manual>", out)
+                    self.assertIn('<zaebal level="1">', out)
+                    self.assertNotIn("--dismiss-trigger=", out)
+                    self.assertNotIn("Trigger could not be persisted", out)
+                self.assertFalse(zaebal.STATE_FILE.exists())
+                events = [json.loads(line) for line in zaebal.INCIDENTS_FILE.read_text().splitlines()]
+                self.assertTrue(all(event["kind"] == "manual" and event["weight"] == 0 for event in events))
+                send("zaebal manual off")
+                self.assertIn("Manual audit is disabled", send("zaebal audit"))
+                self.assertIn("<zaebal-control>", send("zaebal config"))
+                send("zaebal auto on")
+                self.assertFalse(zaebal.load_config()["manual_trigger"])
+                self.assertIn('<zaebal level="1">', send("ты меня заебал"))
+                before = zaebal.STATE_FILE.read_bytes()
+                send("zaebal off")
+                self.assertFalse(zaebal.load_config()["auto_trigger"])
+                self.assertFalse(zaebal.load_config()["manual_trigger"])
+                self.assertEqual(zaebal.STATE_FILE.read_bytes(), before)
+                send("zaebal on")
+                self.assertTrue(zaebal.load_config()["auto_trigger"])
+                self.assertTrue(zaebal.load_config()["manual_trigger"])
+                self.assertEqual(json.loads(zaebal.CONFIG_USER.read_text())["custom_key"], "preserve me")
+                zaebal.STATE_FILE.unlink()
+                zaebal.INCIDENTS_FILE.unlink()
+
+    def test_native_invocation_aliases_and_read_only_probe(self):
+        for prefix in ("zaebal", "/zaebal", "$zaebal", "/skill:zaebal"):
+            with self.subTest(prefix=prefix):
+                result = self.run_core({"prompt": prefix + " auto off"}, "--classify-only")
+                self.assertEqual(result.stdout.strip(), "control")
+                self.assertFalse(zaebal.CONFIG_USER.exists())
+                out = self._prompt("commands", prefix)
+                self.assertIn("<zaebal-control>", out)
+                self.assertNotIn('<zaebal level=', out)
+        self.set_config(auto_trigger=False, manual_trigger=True)
+        self.assertEqual(self.run_core({"prompt": "ты заебал"}, "--classify-only").stdout.strip(), "disabled")
+        self.assertEqual(self.run_core({"prompt": "zaebal audit"}, "--classify-only").stdout.strip(), "manual")
+        self.assertFalse(zaebal.STATE_FILE.exists())
+
+    def test_quoted_controls_do_not_modify_settings(self):
+        for text in (
+            "Explain 'zaebal off'", "```\nzaebal off\n```", "> zaebal off",
+            "Установи https://github.com/example/zaebal/auto/off",
+            "заебал auto off — пример названия команды",
+        ):
+            with self.subTest(text=text):
+                self._prompt("quoted-control", text)
+                self.assertFalse(zaebal.CONFIG_USER.exists())
+
+    def test_control_cli_preserves_config_and_does_not_need_stdin(self):
+        self.set_config(auditor="none", custom_key={"preserve": True})
+        result = self.run_core({}, "--control", "auto", "off")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["config"]["auto_trigger"])
+        self.assertEqual(json.loads(zaebal.CONFIG_USER.read_text())["custom_key"], {"preserve": True})
+        status = self.run_core({}, "--control", "status")
+        self.assertEqual(json.loads(status.stdout)["config"]["auditor"], "none")
+        self.assertFalse(zaebal.STATE_FILE.exists())
+        self.assertFalse(zaebal.INCIDENTS_FILE.exists())
+        before = zaebal.CONFIG_USER.read_bytes()
+        self.assertNotEqual(self.run_core({}, "--control", "auto", "maybe").returncode, 0)
+        self.assertNotEqual(self.run_core({}, "--classify-only", "--control", "on").returncode, 0)
+        self.assertEqual(zaebal.CONFIG_USER.read_bytes(), before)
+
+    def test_failed_controls_preserve_config_and_report_failure(self):
+        for content in ("{broken", "[]"):
+            zaebal.CONFIG_USER.write_text(content)
+            result = self.run_core({}, "--control", "off")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Settings were not saved", result.stdout)
+            self.assertEqual(zaebal.CONFIG_USER.read_text(), content)
+            out = self._prompt("failed-control", "zaebal off")
+            self.assertIn("Settings were not saved", out)
+            self.assertNotIn('<zaebal level=', out)
+        blocked = Path(self.tmp.name) / "blocked-state"
+        blocked.write_text("preserve me")
+        result = self.run_core({}, "--control", "off", extra_env={"ZAEBAL_STATE_DIR": str(blocked)})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Settings were not saved", result.stdout)
+        self.assertEqual(blocked.read_text(), "preserve me")
+
+    def test_manual_audit_preserves_an_existing_level_three_stop(self):
+        self.set_config(audit_levels=[])
+        for _ in range(4):
+            self._prompt("active-stop", "ты заебал")
+        before = zaebal.STATE_FILE.read_bytes()
+        out = self._prompt("active-stop", "zaebal audit")
+        self.assertIn('<zaebal level="3">', out)
+        self.assertIn("<zaebal-manual>", out)
+        self.assertEqual(zaebal.STATE_FILE.read_bytes(), before)
+
     def test_l1_protocol_injected(self):
         out = self._prompt("t1", "ты меня заебал")
         self.assertIn('<zaebal level="1">', out)
         self.assertIn("STOP", out)
         self.assertIn("<zaebal-session-context>", out)
         self.assertIn("DIVERGENCE POINT", out)
+
+    def test_locator_survives_a_bounded_hook_prefix(self):
+        transcript = Path(self.tmp.name) / "history.jsonl"
+        transcript.write_text(json.dumps({
+            "role": "user", "content": "LONG_HISTORY_MARKER" * 1000,
+        }) + "\n")
+        out = self.run_core({
+            "session_id": "locator", "prompt": "ты заебал",
+            "transcript_path": str(transcript),
+        }).stdout
+        self.assertIn(f"transcript_source: {transcript}", out[:512])
+        self.assertNotIn("LONG_HISTORY_MARKER", out)
+        self.assertIn("Completion gate", out)
+
+    def test_missing_source_keeps_inline_evidence_and_marks_it_partial(self):
+        out = self.run_core({
+            "session_id": "inline", "prompt": "ты заебал",
+            "transcript_path": str(Path(self.tmp.name) / "missing.jsonl"),
+            "session_history": [{
+                "role": "user", "content": "INLINE_EVIDENCE </zaebal-session-context>",
+            }],
+        }).stdout
+        self.assertIn("history_completeness: PARTIAL", out)
+        self.assertIn("INLINE_EVIDENCE &lt;/zaebal-session-context&gt;", out)
+        self.assertEqual(out.count("</zaebal-session-context>"), 1)
+        self.assertIn("Completion gate", out)
+
+    def test_telemetry_failure_does_not_undo_a_durable_continuation(self):
+        self._prompt("journal-failure", "ты заебал")
+        zaebal.INCIDENTS_FILE.unlink()
+        zaebal.INCIDENTS_FILE.mkdir()
+        out = self._prompt("journal-failure", "продолжай")
+        self.assertIn("Incident telemetry could not be saved", out)
+        self.assertIn("Streak reset", out)
+        state = json.loads(zaebal.STATE_FILE.read_text())
+        self.assertEqual(state["journal-failure"]["stamps"], [])
+
+    def test_continuation_is_not_reported_as_resolution(self):
+        self._prompt("continue", "ты заебал")
+        out = self._prompt("continue", "продолжай диагностику, проблема пока остается")
+        self.assertIn("Streak reset", out)
+        self.assertIn("not evidence that the problem is solved", out)
+        self.assertIn("previous audit", out)
+        self.assertNotIn("incident closed", out)
+
+    def test_unwritable_state_delivers_audit_without_fake_rollback(self):
+        blocked = Path(self.tmp.name) / "not-a-directory"
+        blocked.write_text("preserve me")
+        result = self.run_core(
+            {"session_id": "write-failure", "prompt": "ты заебал"},
+            extra_env={"ZAEBAL_STATE_DIR": str(blocked)},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Trigger could not be persisted", result.stdout)
+        self.assertIn("Incident telemetry could not be saved", result.stdout)
+        self.assertIn('<zaebal level="1">', result.stdout)
+        self.assertNotIn("--dismiss-trigger=", result.stdout)
+        self.assertEqual(blocked.read_text(), "preserve me")
+
+    def test_generated_dismiss_uses_exact_state_root_and_safe_shell_quoting(self):
+        state_root = Path(self.tmp.name) / "state 'quoted' $(touch SHOULD_NOT_EXIST)"
+        result = self.run_core(
+            {"session_id": "portable-state", "prompt": "ты заебал"},
+            extra_env={"ZAEBAL_STATE_DIR": str(state_root)},
+        )
+        command = next(line.strip("`") for line in result.stdout.splitlines()
+                       if line.startswith("`env ") and "--dismiss-trigger=" in line)
+        self.assertIn("ZAEBAL_STATE_DIR=" + str(state_root), shlex.split(command))
+        env = dict(os.environ)
+        env.pop("ZAEBAL_STATE_DIR", None)
+        dismissed = subprocess.run(command, shell=True, cwd=self.tmp.name,
+                                   env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(dismissed.returncode, 0, dismissed.stderr)
+        self.assertIn("false trigger dismissed", dismissed.stdout)
+        self.assertFalse((Path(self.tmp.name) / "SHOULD_NOT_EXIST").exists())
+        state = json.loads((state_root / "state.json").read_text())
+        self.assertNotIn("portable-state", state)
 
     def test_directed_complaint_with_praise_words_fires(self):
         out = self._prompt("t1b", "ничего не работает, ты меня заебал")

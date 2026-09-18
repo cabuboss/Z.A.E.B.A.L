@@ -89,12 +89,29 @@ class TestCrossPlatform(unittest.TestCase):
             # POSIX command appears on one line in the injected protocol.
             command = next(line.strip().strip("`") for line in out.splitlines()
                            if "--dismiss-trigger=" in line)
+        dismiss_env = dict(self.env)
+        dismiss_env.pop("ZAEBAL_STATE_DIR")
         for _ in range(2):
             result = subprocess.run(shlex.split(command) if os.name == "nt" else command,
-                                    shell=os.name != "nt", env=self.env, capture_output=True,
+                                    shell=os.name != "nt", env=dismiss_env, capture_output=True,
                                     encoding="utf-8", timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('<zaebal level="1">', self.invoke("ты меня заебал"))
+
+    def test_registered_command_controls_preserve_settings_and_do_not_escalate(self):
+        command = installer.install(self.config, self.dest)["command"]
+        self.assertEqual(self.invoke("Установи скилл заебал по ссылке https://github.com/example/zaebal",
+                                     command=command), "")
+        self.assertIn("<zaebal-control>", self.invoke("zaebal auto off", command=command))
+        self.assertEqual(self.invoke("ты меня заебал", command=command), "")
+        for _ in range(4):
+            self.assertIn('<zaebal level="1">', self.invoke("zaebal audit", command=command))
+        self.assertFalse((self.state / "state.json").exists())
+        self.invoke("zaebal manual off", command=command)
+        self.assertIn("Manual audit is disabled", self.invoke("zaebal audit", command=command))
+        self.assertIn("<zaebal-control>", self.invoke("zaebal", command=command))
+        cfg = json.loads((self.state / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg, {"audit_levels": [], "auto_trigger": False, "manual_trigger": False})
 
     def test_invalid_config_is_preserved_before_copy(self):
         self.config.parent.mkdir()

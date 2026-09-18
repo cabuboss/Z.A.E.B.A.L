@@ -49,10 +49,15 @@ Z.A.E.B.A.L. 在用户消息入口加入反馈闭环：
 
 - 粗口和直接抱怨会成为审计信号；
 - “fucking great” 这类带粗口的正面评价保持静默且不会增加连续权重，但不算确认，
-  也不会关闭已有事件；
+  也不会解除 L3 的修改暂停；
 - 信号反复出现时，协议会逐级升级，最终要求完全停止；
 - 在 L3，hook 会尝试启动技术上只读的外部审计；
-- 只有用户明确确认后，工作才会继续。
+- 在 L3，只有用户明确确认后才恢复修改操作。
+
+审计用于质疑智能体的理解，不会固定任务契约。它要求寻找能推翻解释的证据、
+指出下一步具体改变，并检查用户实际遇到的问题。即使没有新的粗口或计数已重置、
+过期，症状重现时也应检查上一次审计。允许继续不等于证明问题已修复。
+参见[匿名化恢复案例](skills/zaebal/references/recovery-examples.md)。
 
 当前版本不安装技术性工具锁。协议通过上下文要求智能体停止，最终控制权始终
 留在用户手中。
@@ -78,12 +83,12 @@ Z.A.E.B.A.L. 在用户消息入口加入反馈闭环：
 | 意图分类 | 在修改连续触发状态前，区分正面评价、定向抱怨与不明确的情绪表达。 | `classify()`；权重 `0`、`1.0`、`0.5` |
 | 会话级升级 | 在 30 分钟滑动窗口内按会话记录信号，并选择 L1、L2 或 L3。 | 原子 JSON 状态 + 原生 `fcntl` / `msvcrt` 锁 |
 | 三层审计协议 | 注入逐渐严格的指令：独立检查、假设清单与完全停止。 | `core/protocol/L1.md` → `L3.md` |
-| 会话优先证据 | 要求工作智能体和两个内部审计智能体按时间顺序阅读会话、定位首次偏离，并与 diff 和带时间戳的提交对应。 | 会话路径 + 有界摘录 + Git 时间线 |
+| 会话优先证据 | 要求工作智能体和两个内部审计智能体按时间顺序阅读会话、定位首次偏离，并与 diff 和带时间戳的提交对应。 | 路径在最前；无源文件时才附带有界摘录 |
 | 外部审计智能体 | 使用同厂商或跨厂商 CLI 检查会话源、定位摘录与仓库证据。 | Claude、Codex、Kimi 或 OpenCode |
 | 四个宿主适配器 | 在 Claude Code、Codex CLI、Kimi CLI 与 OpenCode 提交用户消息时触发。 | JSON hooks、TOML hook 或 TypeScript plugin |
-| 明确恢复机制 | 只有收到 `continue`、`продолжай` 或 `по плану` 等确认才关闭事件。 | 每个会话独立的状态生命周期 |
+| 明确继续机制 | `continue`、`продолжай` 或 `по плану` 重置情绪计数并允许继续，但不证明问题已解决。 | 每个会话独立的状态 |
 | 元数据事件日志 | 记录 trigger、auditor、verdict 与 ack，不保存消息内容。 | `~/.zaebal/incidents.jsonl` |
-| Fail-open 安全 | 错误 payload、缺失审计器、超时或内部异常都不会破坏宿主会话。 | 静默退出码 `0`；审计错误写入上下文 |
+| Fail-open 安全 | 错误不阻断宿主会话。状态或日志写入失败会明确提示；未保存的触发不生成撤销令牌。 | 退出码 `0`；已检测的写入和审计错误进入上下文 |
 
 ## 工作原理
 
@@ -179,11 +184,34 @@ scripts/kimi-host-canary.sh
 
 ## 配置
 
+在智能体聊天中输入 `zaebal` 即可查看设置。安装请求、GitHub 链接和技能名称的
+讨论不会启动审计。Claude Code、Codex、Kimi CLI 和 OpenCode 使用同一个核心：
+
+| 聊天命令 | 操作 |
+|---|---|
+| `zaebal` / `zaebal config` | 显示设置，不启动审计 |
+| `zaebal auto off` / `zaebal auto on` | 关闭 / 开启自动粗口触发 |
+| `zaebal manual off` / `zaebal manual on` | 关闭 / 开启显式手动审计 |
+| `zaebal off` / `zaebal on` | 关闭 / 开启两种审计入口 |
+| `zaebal audit` | 执行一次手动审计，不增加粗口连续触发权重 |
+
+两个开关关闭后，设置仍可访问。单独的俄语 `заебал` 仍可能是抱怨；管理时请使用
+拉丁字母 `zaebal`。原生技能入口采用相同路由：
+[Claude Code](https://code.claude.com/docs/en/skills) `/zaebal`、
+[Codex](https://learn.chatgpt.com/docs/build-skills) `$zaebal`、
+[Kimi](https://moonshotai.github.io/kimi-cli/en/customization/skills.html) `/skill:zaebal`；
+在 [OpenCode](https://opencode.ai/docs/skills) 中请求智能体使用 `zaebal`。
+没有活动 hook 时，技能使用 `python3 ~/.zaebal/core/zaebal.py --control status`，
+或 `--control auto off` / `--control manual off`。安装器也会将技能复制到
+`~/.kimi/skills/zaebal/`，避免其他通用技能目录使 Kimi 忽略它。
+
 默认值位于 [`core/config.json`](core/config.json)。用户覆盖配置位于
-`~/.zaebal/config.json`，下一次触发时自动加载：
+`~/.zaebal/config.json`，所有宿主共享，在下一条消息时自动加载：
 
 ```json
 {
+  "auto_trigger": true,
+  "manual_trigger": true,
   "auditor": "same",
   "audit_levels": [3],
   "auditor_timeout_sec": 90,
@@ -196,13 +224,15 @@ scripts/kimi-host-canary.sh
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
+| `auto_trigger` | `true` | 自动粗口检测及技能隐式启动的审计。 |
+| `manual_trigger` | `true` | 显式手动审计。关闭后仍可查看设置和帮助。 |
 | `auditor` | `"same"` | 与宿主相同的厂商、指定 `kimi` / `claude` / `codex` / `opencode`，或 `"none"`。内置 Kimi/OpenCode 审计在未显式启用 unsafe 模式时会明确降级。 |
 | `audit_levels` | `[3]` | 同步调用外部审计器的级别；使用 `[2, 3]` 可以更早审计。 |
 | `auditor_timeout_sec` | `90` | 等待审计结果的最长秒数。 |
 | `auditor_command` | `""` | 自定义命令；审计 prompt 会作为最后一个参数加入。 |
 | `allow_unsafe_auditor` | `false` | 允许没有强制只读模式的内置 Kimi/OpenCode 审计器。优先使用 Claude/Codex 或 sandboxed `auditor_command`。 |
 | `transcript_tail_chars` | `12000` | 发送给审计器的最大定位摘录；可读取的会话文件路径仍是权威历史。 |
-| `agent_context_tail_chars` | `2500` | 每一级注入给工作智能体的会话定位摘录大小；若存在会话文件路径，所有审计参与者必须读取该源文件。 |
+| `agent_context_tail_chars` | `2500` | 无可读会话文件时的摘录上限；有源文件时，先注入路径，智能体直接读取源文件。 |
 
 示例：让 Claude 审计 Codex 会话。
 

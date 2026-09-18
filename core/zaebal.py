@@ -4,6 +4,7 @@
 Zaebal? Audit. Errors. Break. Analize. Leave no assumption.
 
 Modes:
+  --control ...      Show settings or toggle auto/manual triggers; no stdin read.
   default            UserPromptSubmit hook. Detects profanity (ru/en/zh) in the
                      user's prompt, tracks the streak per session and prints the
                      escalation protocol plus a session/Git evidence locator for
@@ -11,6 +12,8 @@ Modes:
                      (headless CLI) against the transcript and injects its
                      verdict. An explicit acknowledgment from the user
                      ("продолжай", "согласен", ...) resets the streak.
+                     Standalone zaebal commands manage settings or request a
+                     manual audit without increasing the profanity streak.
 
 Contract with host hooks (Claude Code / Codex CLI / Kimi CLI):
   - exit 0, non-empty stdout -> stdout is appended to the agent's context
@@ -50,6 +53,8 @@ WINDOW_SECONDS = 30 * 60  # sliding window for the escalation streak
 MAX_SESSIONS = 50         # cap on sessions kept in the state file
 
 DEFAULT_CONFIG = {
+    "auto_trigger": True,     # automatic profanity detection
+    "manual_trigger": True,   # explicit zaebal audit requests
     "auditor": "same",        # "same" = same vendor as the host, or kimi/claude/codex/opencode/none
     "audit_levels": [3],      # levels that trigger the external auditor (sync wait!)
     "auditor_timeout_sec": 90,
@@ -97,7 +102,7 @@ LEET_RU = str.maketrans({
 # is counted. Order matters: addressee is checked first, praise is cancelled
 # by complaint markers, everything left is "ambiguous" (half-weight streak).
 _PRAISE = re.compile(
-    r"\b(спасиб|благодар|получилос|отличн|крут|здорово|молодц|красав"
+    r"\b(заебись|охуенно|пиздато|спасиб|благодар|получилос|отличн|круто\b|здорово|молодц|красав"
     r"|thank|great|awesome|amazing|perfect|nice|love|excellent)"
     r"|(?<!не )\bработает\b"
     r"|谢谢|感谢|太好"
@@ -110,7 +115,7 @@ _SECOND_PERSON = re.compile(
 # complaint markers: cancel praise ("сначала было отлично, но теперь сломал")
 _COMPLAINT = re.compile(
     r"\b(?:опять|снова|сломал|сломано?|поломал|глючит|падает"
-    r"|still|again|broken|wrong)\b"
+    r"|still|again|broken|wrong|но|but)\b|\b(?:говн|дерьм)"
     r"|сколько можно|не работает|doesn'?t work|not working|\bне то\b|\bне так\b"
 )
 _SELF_NAME = re.compile(r"(?<!\w)(?:заебал|zaebal)(?!\w)", re.IGNORECASE)
@@ -135,12 +140,27 @@ _REFERENCE_OBJECT = re.compile(
 _META_ACTION = re.compile(
     r"\b(?:изучи|исследуй|проанализируй|разбери|обсуди|проверь|сравни|найди"
     r"|контекст\w*|использ\w*|упомин\w*|что\s+делает|как\s+работает"
-    r"|реакц\w*|analy[sz]e|inspect|review|compare|context|usage|used|mention|reaction)\b",
+    r"|реакц\w*|установ\w*|скача\w*|настро\w*|отключ\w*|включ\w*|обнов\w*"
+    r"|удал\w*|добав\w*|исправ\w*|(?:по)?фикс\w*"
+    r"|analy[sz]e|inspect|review|compare|context|usage|used|mention|reaction"
+    r"|install\w*|uninstall|setup|config\w*|settings|enable|disable|update|remove|fix)\b",
     re.IGNORECASE,
 )
 _META_PRODUCT_USE = re.compile(
-    r"\b(?:скилл|хук|протокол|плагин|аудит|skill|hook|protocol|plugin|audit)\w*"
+    r"\b(?:скилл|хук|протокол|плагин|аудит|агент|слов|триггер|назван"
+    r"|установи|скачай|настрой|обнови|отключи|включи|удали"
+    r"|skill|hook|protocol|plugin|audit|agent|install|configure|update|uninstall)\w*"
     r"\s+[\"'`«“‘]*\s*(?:заебал|zaebal)\b",
+    re.IGNORECASE,
+)
+_META_SUBJECT = re.compile(
+    r"\b(?:заебал|zaebal)\s+(?:и\s+так\s+)?(?:помогает|работает|сокращает|обнаруживает|проверяет)\b",
+    re.IGNORECASE,
+)
+_URL = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+_CONTROL = re.compile(
+    r"(?:zaebal|/zaebal|\$zaebal|/skill:zaebal)"
+    r"(?:\s+(status|config|help|audit|on|off|(?:auto|manual)\s+(?:on|off)))?",
     re.IGNORECASE,
 )
 _BLOCKQUOTE_LINE = re.compile(r"(?m)^\s*>.*$")
@@ -150,7 +170,7 @@ _REFERENCE_TAIL = re.compile(
     r"|цитата|reference(?:\s+material)?"
     r"|(?:(?:here|below)\s+is\s+)?(?:an?\s+)?example(?:s)?)\s*:\s*.*$"
 )
-# explicit acknowledgment: closes the incident (streak reset)
+# Continuation unlocks work and resets the emotional streak, not the diagnosis.
 _ACK_START = re.compile(
     r"^(?:(?:да|ок|окей|ладно|хорошо|yes|ok|okay|please)\s+)*"
     r"(?:продолжай|продолжаем|(?:я\s+)?согласен|принято|принимаю"
@@ -167,6 +187,8 @@ ACK_NOTICE = (
     '<zaebal level="0">\n'
     "Streak reset: the user confirmed continuation.\n"
     "Proceed with the plan agreed with the human.\n"
+    "Continuation is not evidence that the problem is solved. Revisit the previous "
+    "audit if the symptom repeats, even after the streak resets or expires.\n"
     "</zaebal>\n"
 )
 ACK_FAILURE_NOTICE = (
@@ -206,6 +228,10 @@ def make_variants(text):
     "<lang>_raw"  punctuation kept; used for junk-tolerant root matching.
     """
     out = {}
+    # Measurements such as 45s must not become profanity through 4->a, 5->s.
+    # Keep mixed leet words (f4ck, за3бал) available for normal detection.
+    text = re.sub(r"(?<!\w)\d+(?:[.,]\d+)?(?:ms|s|sec|min|h|kb|mb|gb|hz|мс|с|мин|ч|кб|мб|гб|гц)?\b",
+                  " ", text, flags=re.IGNORECASE)
     for lang, table in (("ru", LEET_RU), ("en", LEET_EN), ("zh", LEET_EN)):
         out[lang] = normalize(text, table)
         out[lang + "_raw"] = normalize(text, table, punct_to_space=False)
@@ -275,6 +301,7 @@ def trigger_scope_text(source_text):
     if not source_text:
         return ""
     text = _FENCED_BLOCK.sub(" ", source_text)
+    text = _URL.sub(" ", text)
     text = _BLOCKQUOTE_LINE.sub(" ", text)
     marker = _REFERENCE_TAIL.search(text)
     if marker:
@@ -297,27 +324,29 @@ def trigger_scope_text(source_text):
             spans.append((match.start(), match.end()))
     for start, end in reversed(spans):
         text = text[:start] + " " + text[end:]
+    # Exclude each product reference, not the whole message: a separate real
+    # complaint must still count, including in an installation request.
+    spans = []
+    for clause in re.finditer(r"[^.!?;。！？\n]+", text):
+        part = clause.group()
+        product_uses = list(_META_PRODUCT_USE.finditer(part))
+        for name in _SELF_NAME.finditer(part):
+            if _META_SUBJECT.match(part, name.start()) or (
+                _META_ACTION.search(part) and any(
+                    use.start() <= name.start() and name.end() <= use.end()
+                    for use in product_uses
+                )
+            ):
+                spans.append((clause.start() + name.start(), clause.start() + name.end()))
+    for start, end in reversed(spans):
+        text = text[:start] + " " + text[end:]
     return text.strip()
 
 
-def _is_meta_self_mention(source_text, matches, variants):
-    """True for an explicit action about the named product, not an insult."""
-    if not source_text or len(matches) != 1:
-        return False
-    raw = unicodedata.normalize("NFKC", source_text).lower()
-    names = list(_SELF_NAME.finditer(raw))
-    if len(names) != 1:
-        return False
-    normalized_names = list(re.finditer(r"\bзаебал\b", variants["ru_raw"]))
-    lang, match_start, match_end = matches[0]
-    if not (
-        lang == "ru"
-        and len(normalized_names) == 1
-        and match_start == normalized_names[0].start()
-        and match_end <= normalized_names[0].end()
-    ):
-        return False
-    return bool(_META_ACTION.search(raw) and _META_PRODUCT_USE.search(raw))
+def parse_control(text):
+    """Only a standalone command is actionable; examples and URLs are not."""
+    match = _CONTROL.fullmatch(text.strip())
+    return " ".join((match.group(1) or "status").lower().split()) if match else None
 
 
 def classify(variants, patterns, source_text=None):
@@ -340,8 +369,6 @@ def classify(variants, patterns, source_text=None):
     if not matches:
         return "clean"
     complained = _COMPLAINT.search(variants["ru"]) or _COMPLAINT.search(variants["en"])
-    if not complained and _is_meta_self_mention(source_text, matches, variants):
-        return "clean"
     if _SECOND_PERSON.search(variants["ru"]) or _SECOND_PERSON.search(variants["en"]):
         return "directed"
     praised = _PRAISE.search(variants["ru"]) or _PRAISE.search(variants["en"])
@@ -453,9 +480,9 @@ def validate_config(cfg):
         and all(isinstance(arg, str) and arg for arg in command)
     ):
         out["auditor_command"] = command
-    unsafe = cfg.get("allow_unsafe_auditor", out["allow_unsafe_auditor"])
-    if isinstance(unsafe, bool):
-        out["allow_unsafe_auditor"] = unsafe
+    for key in ("allow_unsafe_auditor", "auto_trigger", "manual_trigger"):
+        if isinstance(cfg.get(key), bool):
+            out[key] = cfg[key]
 
     out["auditor_timeout_sec"] = _bounded_int(
         cfg.get("auditor_timeout_sec"), out["auditor_timeout_sec"], 1, 600,
@@ -467,6 +494,63 @@ def validate_config(cfg):
         cfg.get("agent_context_tail_chars"), out["agent_context_tail_chars"], 500, 12000,
     )
     return out
+
+
+def set_trigger_config(updates):
+    """Preserve unrelated settings and refuse to overwrite a malformed config."""
+    with _locked():
+        data = json.loads(CONFIG_USER.read_text(encoding="utf-8")) if CONFIG_USER.exists() else {}
+        if not isinstance(data, dict):
+            raise ValueError("config.json must contain an object")
+        data.update(updates)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = CONFIG_USER.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(CONFIG_USER)
+
+
+def mode_control(command, hook=False):
+    """Shared management entry point for hooks and manual skill invocations."""
+    updates = {}
+    if command in ("on", "off"):
+        updates = dict.fromkeys(("auto_trigger", "manual_trigger"), command == "on")
+    elif command in ("auto on", "auto off", "manual on", "manual off"):
+        key, value = command.split()
+        updates[key + "_trigger"] = value == "on"
+    elif command not in ("status", "config", "help", "audit"):
+        sys.stderr.write("Unknown control. Use status, auto on/off, manual on/off, on/off.\n")
+        return 1
+    try:
+        if updates:
+            set_trigger_config(updates)
+    except (OSError, ValueError) as error:
+        sys.stdout.write(
+            "<zaebal-control>Settings were not saved: " + _markup_safe(str(error))
+            + ". Do not claim success or start an audit.</zaebal-control>\n"
+        )
+        return 1
+    cfg = load_config()
+    if not hook:
+        sys.stdout.write(json.dumps({"config_path": str(CONFIG_USER), "config": cfg},
+                                   ensure_ascii=False, indent=2) + "\n")
+        return 0
+    message = ("Manual audit is disabled. Use zaebal manual on to enable it.\n"
+               if command == "audit" and not cfg["manual_trigger"] else "")
+    sys.stdout.write(
+        "<zaebal-control>\nConfiguration request, not an audit trigger. "
+        "Report these settings; do not invoke the audit or repeat this command.\n"
+        + message + "config_path: " + _markup_safe(str(CONFIG_USER)) + "\n"
+        + _markup_safe(json.dumps(cfg, ensure_ascii=False, indent=2)) + "\n"
+        "Commands: zaebal [status|config|help], zaebal auto on/off, "
+        "zaebal manual on/off, zaebal on/off, zaebal audit.\n"
+        "Settings apply to all hosts on the next message. Existing streaks are unchanged.\n"
+        "</zaebal-control>\n"
+    )
+    return 0
 
 
 # ------------------------------------------------------------------ state
@@ -558,15 +642,22 @@ def record_trigger(session_id, now=None, weight=1.0, return_token=False):
     """Register a profanity trigger. Returns (streak_weight, level)."""
     now = now if now is not None else time.time()
     trigger_id = secrets.token_urlsafe(18)
-    with _locked():
-        state = _prune(_load_state(), now)
-        entry = _session_entry(state, session_id)
-        entry["stamps"].append([now, weight, trigger_id])
-        total = sum(stamp[1] for stamp in entry["stamps"])
+    try:
+        with _locked():
+            state = _prune(_load_state(), now)
+            entry = _session_entry(state, session_id)
+            entry["stamps"].append([now, weight, trigger_id])
+            total = sum(stamp[1] for stamp in entry["stamps"])
+            level = level_for(total)
+            saved = _save_state(state)
+    except OSError:
+        # A failed lock permits only a provisional level, never an unlocked write.
+        stamps = _session_entry(_load_state(), session_id)["stamps"]
+        total = sum(stamp[1] for stamp in _norm_stamps(stamps, now)) + weight
         level = level_for(total)
-        _save_state(state)
+        saved = False
     if return_token:
-        return total, level, trigger_id
+        return total, level, trigger_id if saved else None
     return total, level
 
 
@@ -576,17 +667,20 @@ def acknowledge(session_id):
     Returns True after a durable reset, False when no incident exists, and None
     when the state write failed.
     """
-    with _locked():
-        state = _load_state()
-        entry = state.get(session_id)
-        if not isinstance(entry, (dict, list)):
-            return False
-        entry = _session_entry(state, session_id)
-        if not entry["stamps"]:
-            return False
-        entry["stamps"] = []
-        if not _save_state(state):
-            return None
+    try:
+        with _locked():
+            state = _load_state()
+            entry = state.get(session_id)
+            if not isinstance(entry, (dict, list)):
+                return False
+            entry = _session_entry(state, session_id)
+            if not entry["stamps"]:
+                return False
+            entry["stamps"] = []
+            if not _save_state(state):
+                return None
+    except OSError:
+        return None
     return True
 
 
@@ -597,20 +691,23 @@ def dismiss_trigger(trigger_id, now=None):
     token is absent/replayed, and ``None`` if persistence failed.
     """
     now = now if now is not None else time.time()
-    with _locked():
-        state = _prune(_load_state(), now)
-        for session_id in list(state):
-            entry = _session_entry(state, session_id)
-            for index, stamp in enumerate(entry["stamps"]):
-                if len(stamp) == 3 and secrets.compare_digest(stamp[2], trigger_id):
-                    weight = stamp[1]
-                    entry["stamps"].pop(index)
-                    if not entry["stamps"]:
-                        state.pop(session_id, None)
-                    if not _save_state(state):
-                        return None
-                    return session_id, weight
-        return False
+    try:
+        with _locked():
+            state = _prune(_load_state(), now)
+            for session_id in list(state):
+                entry = _session_entry(state, session_id)
+                for index, stamp in enumerate(entry["stamps"]):
+                    if len(stamp) == 3 and secrets.compare_digest(stamp[2], trigger_id):
+                        weight = stamp[1]
+                        entry["stamps"].pop(index)
+                        if not entry["stamps"]:
+                            state.pop(session_id, None)
+                        if not _save_state(state):
+                            return None
+                        return session_id, weight
+            return False
+    except OSError:
+        return None
 
 
 def record_incident(session_id, level, kind, weight,
@@ -634,8 +731,11 @@ def record_incident(session_id, level, kind, weight,
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             with open(INCIDENTS_FILE, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        return True
     except Exception:
-        pass  # fail-open
+        sys.stdout.write('<zaebal-state-error>Incident telemetry could not be saved.'
+                         '</zaebal-state-error>\n')
+        return False  # logging must not prevent delivery of the protocol
 
 
 # ---------------------------------------------------------------- auditor
@@ -827,9 +927,17 @@ def resolve_transcript_path(payload, host="unknown"):
     """Resolve a real transcript file supplied by the host or known host index."""
     path = payload.get("transcript_path")
     if isinstance(path, str) and path and Path(path).is_file():
-        return Path(path)
-    if host == "kimi":
-        return kimi_transcript_path(payload.get("session_id") or payload.get("sessionID"))
+        candidate = Path(path)
+    elif host == "kimi":
+        candidate = kimi_transcript_path(payload.get("session_id") or payload.get("sessionID"))
+    else:
+        candidate = None
+    if candidate:
+        try:
+            with candidate.open("rb"):
+                return candidate
+        except OSError:
+            pass  # Keep inline evidence when the file exists but cannot be read.
     return None
 
 
@@ -888,7 +996,7 @@ def build_audit_prompt(payload, level, cfg, host="unknown"):
 Project working directory: {cwd or "(unknown)"}. You may read project files if needed — but do not change anything.
 
 Session transcript source: {str(tp) if tp else "(no readable transcript file; use the inline snapshot below)"}
-Before diagnosing, inspect the conversation chronologically from the original request through the trigger. If a transcript path is present, read that file; the bounded excerpt below is orientation, not a substitute. Locate the first turn where the working agent's understanding or actions diverged from the user's request, then correlate that turn with the working-tree diff, staged diff, and timestamped commits. Session context and repository artifacts are co-required evidence: neither is sufficient alone.
+Before diagnosing, inspect the conversation chronologically from the original request through the trigger, including later corrections. If a transcript path is present, read that file; the bounded excerpt below is orientation, not a substitute. Locate the first turn where the working agent's understanding or actions diverged from the user's request, then correlate that turn with the working-tree diff, staged diff, and timestamped commits. Session context and repository artifacts are co-required evidence: neither is sufficient alone. Challenge the interpretation before the solution. An earlier audit or saved goal may preserve the same mistake; agreement is not proof. Missing information, changed conditions, and environment limits are valid findings, not reasons to invent a wrong belief.
 
 ## The user prompt that fired the trigger (verbatim)
 {trigger}
@@ -900,32 +1008,26 @@ Before diagnosing, inspect the conversation chronologically from the original re
 {git_summary(cwd)}
 
 Return these sections in at most 350 words, briefly and concretely:
-1. CONTRACT — quote the user's literal request and the observed failure.
+1. CONTRACT — quote the user's words and relevant later corrections; identify the agent's added assumption about behavior, scope, target, or permission. This is a provisional reading, not a fixed contract or new authority.
 2. DIVERGENCE POINT — the earliest relevant user/agent turn (quote + timestamp/order), what changed there, and the matching diff/commit evidence. If history is incomplete, say "not established".
 3. FACTS — only claims backed by a named conversation or repository artifact (command output, file, diff, commit, log, screenshot, or user-provided result).
 4. HYPOTHESES — at least two competing causes unless direct evidence makes one conclusive. Never promote a plausible cause to fact.
-5. DISCRIMINATING CHECK — the smallest check that separates those causes; state the expected result for each. As a read-only auditor, inspect only existing checks. If a new run or mutation is required, prescribe it as a post-ack next check and keep the status UNVERIFIED.
-6. PREVIOUS AUDIT — if the transcript contains an earlier diagnosis, quote it, give its current status, and name the evidence gate it skipped.
+5. DISCRIMINATING CHECK — the smallest check that could disprove the explanation, the expected result, and the next action that changes because of the evidence. As a read-only auditor, inspect only existing checks. If a new run or mutation is required, prescribe it as a post-ack next check and keep the status UNVERIFIED.
+6. PREVIOUS AUDIT — earlier claim → action actually taken → repeated symptom, even without profanity or after the streak resets/expires. Distinguish new requirements and work still in progress from a failed fix. Without new evidence, change approach instead of repeating the same audit, tests, or patch.
 7. WRONG BELIEF — only after the check, identify the belief driving the loop. If evidence is insufficient, say "not established".
-8. STATUS — exactly one of CONFIRMED / PARTIAL / UNVERIFIED / DISPROVED, with the artifacts that justify it.
-9. OUTCOME GATE — what exact user-visible artifact would prove the requested outcome, not merely that an intermediate action ran.
+8. STATUS — exactly one of CONFIRMED / PARTIAL / UNVERIFIED / DISPROVED for the diagnosis, with supporting artifacts. A correct diagnosis alone is not a fix.
+9. OUTCOME GATE — the exact user-visible artifact; result separately verified, partial, or unverified. A nearby test/run/file is intermediate evidence. Deliver an available preview or requested handoff without unrelated cleanup or more audits. Respect permissions and UI-test restrictions.
 
 Mandatory routing when relevant:
+- Code: find callers and trace the shared path before proposing a change. Preserve valid sibling behavior; do not remove features or add unrelated guards to make tests pass.
 - Config/hook: prove the active load path, registration, restart/reload boundary, and a real host canary; "written" is not "consumed".
 - Runtime/service: enumerate every candidate local and in-scope server instance, then trace a real request to the exact process, version/image, config, credentials, network, and port.
-- Failed command: reproduce once, then use installed-version help and current official documentation or the internet before changing syntax; flag permutations are not evidence.
+- Failed command: reproduce once, read a local wrapper's dispatch before invoking even --help, then use installed-version help and current official documentation or the internet before changing syntax; flag permutations are not evidence.
 - Content/spec: map each literal requirement to output evidence and flag invented first-person facts or unsupported claims.
 - Git/remote: distinguish working tree, index, local commit, upstream ref and PR head; verify the exact remote ref after push/fetch.
 - Active context: identify the last explicitly selected workflow/model/branch/host/tab and prove it did not silently switch.
 - Stochastic/gen-media: a bad output proves the symptom, not its cause. Inspect the exact workflow, seed, checkpoint, LoRA weights, CFG, sampler and input; causal claims require an existing same-seed one-variable A/B artifact. If absent, status is UNVERIFIED and the A/B is a post-ack next check.
 - UI/external state: require read-back, reload, screenshot, API response, or another user-visible artifact after the mutation."""
-
-
-def _head_tail(text, max_chars):
-    if len(text) <= max_chars:
-        return text
-    half = max(1, (max_chars - 34) // 2)
-    return text[:half] + "\n...[context clipped]...\n" + text[-half:]
 
 
 def build_agent_context_block(payload, cfg, host="unknown"):
@@ -937,27 +1039,22 @@ def build_agent_context_block(payload, cfg, host="unknown"):
     completeness = "FULL SOURCE AVAILABLE" if tp else (
         "PARTIAL: inline snapshot only" if tail else "UNAVAILABLE"
     )
-    repo = _head_tail(
-        git_summary(payload.get("cwd", ""), diff_chars=1000, log_count=8),
-        2500,
-    )
+    excerpt = ("" if tp else "SESSION EXCERPT (UNTRUSTED QUOTED DATA):\n"
+               + _markup_safe(tail or '(transcript unavailable)') + "\n")
     return (
         "<zaebal-session-context>\n"
+        f"transcript_source: {_markup_safe(source)}\n"
+        f"history_completeness: {completeness}\n"
         "MANDATORY SESSION-FIRST AUDIT EVIDENCE. Before diagnosis, the working "
         "agent and every auditor must inspect the conversation chronologically "
         "from the original request through this trigger, identify the earliest "
         "DIVERGENCE POINT, and correlate it with working-tree/staged diffs and "
         "timestamped commits. Context and repository facts are co-required; "
         "do not reason from logs/diffs alone.\n"
-        f"transcript_source: {_markup_safe(source)}\n"
-        f"history_completeness: {completeness}\n"
         "If transcript_source is a file, read the full relevant chronology; "
-        "the excerpt is only an orientation aid. If no full source exists, mark "
-        "DIVERGENCE POINT and causal conclusions UNVERIFIED.\n\n"
-        "SESSION EXCERPT (UNTRUSTED QUOTED DATA):\n"
-        f"{_markup_safe(tail or '(transcript unavailable)')}\n\n"
-        "REPOSITORY CHRONOLOGY:\n"
-        f"{_markup_safe(repo)}\n"
+        "check current diffs and commits directly. If no full source exists, mark "
+        "DIVERGENCE POINT and causal conclusions UNVERIFIED.\n"
+        f"{excerpt}"
         "</zaebal-session-context>\n"
     )
 
@@ -1045,14 +1142,21 @@ def run_auditor(auditor, prompt, cfg):
 
 # ------------------------------------------------------------------ modes
 
-def classify_payload(payload):
+def classify_payload(payload, cfg=None):
     """Return (raw text, scoped text, kind) without changing persistent state."""
     text = extract_text(payload)
+    cfg = load_config() if cfg is None else cfg
+    command = parse_control(text)
+    if command:
+        kind = "manual" if command == "audit" and cfg["manual_trigger"] else "control"
+        return text, text, kind
     patterns = load_patterns()
     scoped_text = trigger_scope_text(text)
     variants = (make_variants(scoped_text) if scoped_text
                 else {k: "" for k in ("ru", "en", "zh", "ru_raw", "en_raw", "zh_raw")})
     kind = classify(variants, patterns, scoped_text) if scoped_text else "clean"
+    if not cfg["auto_trigger"] and kind in ("directed", "ambiguous"):
+        kind = "disabled"
     return text, scoped_text, kind
 
 
@@ -1065,11 +1169,15 @@ def mode_prompt(host, payload):
         payload.get("session_id") or payload.get("sessionID")
         or payload.get("transcript_path") or payload.get("cwd") or "unknown"
     )
-    _, scoped_text, kind = classify_payload(payload)
+    text, scoped_text, kind = classify_payload(payload, cfg)
+    if kind == "control":
+        mode_control(parse_control(text), hook=True)
+        return 0
+    if kind == "disabled":
+        return 0
 
     if kind in ("clean", "praise"):
-        # incident closes only on explicit continuation-bearing acknowledgment,
-        # not on any calm message: "что?" / "покажи ошибку" change nothing
+        # Continuation resets the emotional streak; it does not prove a fix.
         acked = is_acknowledgment(scoped_text)
         if acked:
             ack_result = acknowledge(session_id)
@@ -1084,9 +1192,14 @@ def mode_prompt(host, payload):
         return 0
 
     weight = weight_for(kind)
-    _, level, trigger_id = record_trigger(
-        session_id, weight=weight, return_token=True
-    )
+    if kind == "manual":
+        stamps = _session_entry(_load_state(), session_id)["stamps"]
+        level = level_for(sum(stamp[1] for stamp in _norm_stamps(stamps, time.time())))
+        trigger_id = None
+    else:
+        _, level, trigger_id = record_trigger(
+            session_id, weight=weight, return_token=True
+        )
 
     verdict_block = ""
     auditor_invoked = False
@@ -1122,16 +1235,31 @@ def mode_prompt(host, payload):
         verdict_received=verdict_received,
         trigger_id=trigger_id,
     )
-    dismiss = shell_command([
+    if kind == "manual":
+        sys.stdout.write(
+            '<zaebal-manual>Explicit audit request: execute this level once. '
+            'No profanity trigger was recorded; skip the false-trigger check. '
+            'Do not invoke this skill or send zaebal audit again to start it. '
+            'Any existing level-3 stop still applies.</zaebal-manual>\n'
+        )
+    elif trigger_id is None:
+        sys.stdout.write(
+            '<zaebal-state-error>Trigger could not be persisted. The level is '
+            'provisional; no rollback token exists. Continue the diagnostic audit, '
+            'but do not claim a saved streak or bypass filesystem permissions.'
+            '</zaebal-state-error>\n'
+        )
+    dismiss = (shell_command([
         sys.executable, "-X", "utf8", str(BASE_DIR / "zaebal.py"),
         "--dismiss-trigger=" + trigger_id,
-    ])
+    ], env={"ZAEBAL_STATE_DIR": str(STATE_DIR)}) if trigger_id else ("Manual audit: no trigger to roll back." if kind == "manual"
+                           else "No rollback command: trigger state was not saved."))
     protocol = (BASE_DIR / "protocol" / f"L{level}.md").read_text(encoding="utf-8").strip()
     protocol = protocol.replace("{{DISMISS_COMMAND}}", dismiss)
     context_block = build_agent_context_block(payload, cfg, host)
     sys.stdout.write(
-        f'<zaebal level="{level}">\n{protocol}\n</zaebal>\n'
-        f'{context_block}{verdict_block}'
+        f'{context_block}<zaebal level="{level}">\n{protocol}\n</zaebal>\n'
+        f'{verdict_block}'
     )
     return 0
 
@@ -1148,11 +1276,20 @@ def main():
     parser = argparse.ArgumentParser(description="Z.A.E.B.A.L. core")
     parser.add_argument("--host", default="unknown",
                         help="host agent: claude / codex / kimi / opencode")
-    parser.add_argument("--dismiss-trigger",
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--dismiss-trigger",
                         help="remove exactly this tokenized false trigger")
-    parser.add_argument("--classify-only", action="store_true",
+    modes.add_argument("--classify-only", action="store_true",
                         help="classify the payload without changing state")
+    modes.add_argument("--control", nargs="+",
+                        help="manage settings: status, auto on/off, manual on/off, on/off")
     args = parser.parse_args()
+
+    if args.control:
+        command = " ".join(args.control).lower()
+        if command == "audit":
+            parser.error("use zaebal audit in the agent chat, not --control")
+        return mode_control(command)
 
     if args.dismiss_trigger:
         removed = dismiss_trigger(args.dismiss_trigger)

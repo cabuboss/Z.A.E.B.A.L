@@ -70,7 +70,7 @@ export const ZaebalPlugin: Plugin = async ({ client, directory }) => {
     "chat.message": async (input, output) => {
       try {
         const text = (output.parts as any[])
-          .filter((p) => p && p.type === "text" && typeof p.text === "string")
+          .filter((p) => p && p.type === "text" && !p.synthetic && typeof p.text === "string")
           .map((p) => p.text)
           .join("\n")
         if (!text.trim()) return
@@ -82,7 +82,7 @@ export const ZaebalPlugin: Plugin = async ({ client, directory }) => {
           { input: probePayload, encoding: "utf8", timeout: 10000 },
         )
         const kind = (probe.stdout ?? "").trim()
-        const transcriptPath = kind === "directed" || kind === "ambiguous"
+        const transcriptPath = kind === "directed" || kind === "ambiguous" || kind === "manual"
           ? await snapshotSession(
               client,
               input.sessionID ?? "unknown",

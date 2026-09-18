@@ -2,15 +2,15 @@
 
 Use one primary playbook and any secondary playbook that the failure crosses. Do not run every check mechanically. The common output is:
 
-1. `CONTRACT` — literal request and observed failure.
+1. `CONTRACT` — the user's words, relevant later corrections, and the agent's added assumption. This interpretation is provisional; do not freeze it or treat a saved goal/auditor's paraphrase as authority.
 2. `DIVERGENCE POINT` — earliest relevant conversation turn (quote plus timestamp/order), the mismatch introduced there, and the corresponding diff/commit evidence. If history is incomplete, use `not established`.
 3. `FACTS` — each fact names a conversation or repository artifact.
 4. `HYPOTHESES` — at least two competing causes unless direct evidence is conclusive.
-5. `DISCRIMINATING CHECK` — smallest check that produces different expected results for the causes. During a read-only stop, inspect existing evidence only; prescribe any new run/mutation as a post-ack next check.
-6. `PREVIOUS AUDIT` — quote any earlier causal conclusion, its current status, and the evidence gate it skipped.
+5. `DISCRIMINATING CHECK` — smallest check that could disprove the explanation, its expected results, and the next action that changes because of the evidence. During a read-only stop, inspect existing evidence only; prescribe any new run/mutation as a post-ack next check.
+6. `PREVIOUS AUDIT` — earlier claim → action actually taken → repeated symptom. Do this even without a new profanity trigger or after the streak resets/expires. Distinguish new requirements and work still in progress from a failed fix. Without new evidence, change approach instead of repeating the audit.
 7. `WRONG BELIEF` — established only after that check; otherwise `not established`.
-8. `STATUS` — `CONFIRMED`, `PARTIAL`, `UNVERIFIED`, or `DISPROVED`.
-9. `OUTCOME GATE` — exact user-visible artifact that proves the requested result.
+8. `STATUS` — `CONFIRMED`, `PARTIAL`, `UNVERIFIED`, or `DISPROVED` for the diagnosis only. Missing information, changed conditions, and environment limits need no invented wrong belief.
+9. `OUTCOME GATE` — exact user-visible artifact; result separately verified, partial, or unverified. A proxy test is intermediate evidence. Deliver an available result or requested handoff without unrelated cleanup or further audits once relevant required checks pass. Respect permissions and UI-test restrictions.
 
 For every playbook, inspect the session chronology before interpreting runtime artifacts. Map request/decision/action turns to working-tree and staged diffs and to timestamped commits. Context explains why an artifact exists; the artifact proves what actually changed. Neither evidence track may replace the other.
 
@@ -19,6 +19,8 @@ For every playbook, inspect the session chronology before interpreting runtime a
 Use for bugs, tests, services, containers, deploys, and “works locally but not for the user.”
 
 - Reproduce the exact failing path, not a nearby unit or helper.
+- Find callers of the function you would change and trace the shared path. Check that the proposed fix rejects the reported failure while preserving valid sibling behavior; do not delete a feature or add unrelated guards to satisfy the test.
+- After one command failure, read a local wrapper's dispatch before invoking even `--help`, then consult installed-version help/documentation instead of guessing flags.
 - Find the conversation turn that selected or justified the failing implementation, then match it to the diff/commit that introduced it.
 - Map the request to the process that actually handles it. Enumerate duplicate local and in-scope server processes, containers, ports, routes, images, worktrees, and credentials.
 - Compare source → built artifact → installed/deployed artifact by version or hash.
@@ -57,6 +59,7 @@ Use for articles, prompts, plans, translations, summaries, structured output, an
 
 - Build a requirement → output-evidence table. Include voice, audience, length, format, forbidden material, and every literal constraint.
 - Trace each requirement to the first session turn where it was accepted, changed, omitted, or contradicted.
+- A later style change does not automatically cancel an earlier structural requirement. A genuine later clarification is not a retroactive violation. For geometry, identify what stays fixed, what moves, and the reference frame before judging the implementation.
 - Separate source-backed claims from invented claims. Flag fabricated first-person experience, metrics, quotes, links, or product behavior.
 - Compare action density with introductory/background “water”; ensure the deliverable starts where the user asked it to start.
 - Verify physical formatting when relevant (one line, JSON schema, headings, character limit), not just semantic intent.
